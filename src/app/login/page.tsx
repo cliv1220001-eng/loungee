@@ -39,7 +39,7 @@ export default function LoginPage() {
         className="panel animate-pop flex w-full max-w-sm flex-col gap-5 rounded-2xl p-8"
       >
         <div className="flex flex-col items-center gap-1 text-center">
-          <h1 className="gradient-text text-4xl font-extrabold tracking-tight">LounGee</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Dota Balancer</h1>
           <p className="text-sm text-zinc-400">Sign in to continue</p>
         </div>
 

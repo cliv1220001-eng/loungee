@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { generateTeams, type BalanceMode, type BalanceResult } from "@/lib/balance";
 import { saveTeams, usePersistentState } from "@/lib/store";
@@ -15,19 +15,34 @@ interface DraftPlayer {
 
 const ROLES: Role[] = [1, 2, 3, 4, 5];
 
-const MODES: { key: BalanceMode; label: string; hint: string; icon: string }[] = [
-  { key: "mmr", label: "Balance MMR", hint: "Closest total MMR", icon: "⚖️" },
-  { key: "role", label: "Spread Roles", hint: "Even roles + MMR", icon: "🎯" },
-  { key: "random", label: "Random", hint: "Pure chaos", icon: "🎲" },
+const MODES: { key: BalanceMode; label: string; hint: string }[] = [
+  { key: "mmr", label: "Balance MMR", hint: "Closest total MMR" },
+  { key: "role", label: "Spread Roles", hint: "Even roles + MMR" },
+  { key: "random", label: "Random", hint: "Shuffle without weighting" },
 ];
 
 const TEAM_ACCENTS = [
-  "#c45bff",
-  "#e38bff",
-  "#9d4edd",
-  "#ff7ac6",
-  "#b388ff",
+  "#5a7fa8",
+  "#5a9a78",
+  "#b08a4a",
+  "#b0605a",
+  "#7a86a0",
 ];
+
+// Fixed MMR bands, highest first. tierOf returns the first band a player clears.
+const TIERS: { n: number; range: string; min: number }[] = [
+  { n: 1, range: "7000+", min: 7000 },
+  { n: 2, range: "5500–6999", min: 5500 },
+  { n: 3, range: "4000–5499", min: 4000 },
+  { n: 4, range: "2500–3999", min: 2500 },
+  { n: 5, range: "below 2500", min: 0 },
+];
+
+function tierOf(mmr: string): number | null {
+  const v = parseInt(mmr, 10);
+  if (Number.isNaN(v)) return null;
+  return TIERS.find((t) => v >= t.min)!.n;
+}
 
 // Newly-added rows get a collision-proof id (restored rows keep their stored ids).
 function makeRow(): DraftPlayer {
@@ -290,8 +305,58 @@ export default function Balancer() {
     setTourneyBusy(false);
   }
 
+  // One compact, editable player card — used in the tier columns and the
+  // not-yet-tiered strip. A card's tier is derived from its MMR, so it lives in
+  // whichever column its MMR falls into and moves when the MMR crosses a band.
+  const renderCard = (row: DraftPlayer): ReactNode => (
+    <div
+      key={row.id}
+      className="flex items-center gap-1.5 rounded-lg border border-[var(--panel-border)] bg-white/[0.02] p-1.5"
+    >
+      <input
+        value={row.name}
+        onChange={(e) => update(row.id, { name: e.target.value })}
+        placeholder="Player name"
+        className="field min-w-0 flex-1 rounded-md px-2 py-1.5 text-[12px]"
+      />
+      <input
+        value={row.mmr}
+        onChange={(e) =>
+          update(row.id, { mmr: e.target.value.replace(/[^0-9]/g, "").slice(0, 5) })
+        }
+        inputMode="numeric"
+        maxLength={5}
+        placeholder="MMR"
+        className="field w-12 shrink-0 rounded-md px-1 py-1.5 text-center text-[12px] tabular-nums"
+      />
+      <select
+        value={row.role ?? ""}
+        onChange={(e) =>
+          update(row.id, { role: e.target.value ? (Number(e.target.value) as Role) : null })
+        }
+        className="field w-16 shrink-0 rounded-md px-1 py-1.5 text-[11px]"
+      >
+        <option value="">Any</option>
+        {ROLES.map((r) => (
+          <option key={r} value={r}>
+            POS {r}
+          </option>
+        ))}
+      </select>
+      <button
+        onClick={() => removeRow(row.id)}
+        aria-label="Remove player"
+        className="shrink-0 rounded px-0.5 text-sm leading-none text-zinc-500 transition-colors hover:text-red-400"
+      >
+        ✕
+      </button>
+    </div>
+  );
+
+  const unrankedRows = rows.filter((r) => tierOf(r.mmr) === null);
+
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-10 px-6 py-12">
+    <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-10 px-6 py-12">
       <header className="flex flex-col gap-3 text-center sm:text-left">
         <h1 className="gradient-text text-4xl font-extrabold tracking-tight sm:text-5xl">
           Build Balanced Teams
@@ -367,11 +432,10 @@ export default function Balancer() {
               onClick={() => setMode(m.key)}
               className={`panel flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-all ${
                 active
-                  ? "ring-2 ring-[var(--lg-primary)] shadow-[0_0_28px_-8px_var(--lg-primary)]"
+                  ? "ring-1 ring-[var(--accent)]"
                   : "opacity-70 hover:opacity-100"
               }`}
             >
-              <span className="text-2xl">{m.icon}</span>
               <span className="flex flex-col">
                 <span className="font-semibold">{m.label}</span>
                 <span className="text-xs text-zinc-400">{m.hint}</span>
@@ -381,56 +445,52 @@ export default function Balancer() {
         })}
       </div>
 
-      {/* Player roster input */}
-      <section className="panel flex flex-col gap-1.5 rounded-2xl p-4">
-        <div className="grid grid-cols-[1fr_5.5rem_8.5rem_2rem] gap-1.5 px-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-          <span>Player</span>
-          <span>MMR</span>
-          <span>Role</span>
-          <span />
+      {/* Player roster input — players auto-sort into MMR tier columns.
+          Breaks out of the centered column to use the full screen width so the
+          five tier columns stay wide enough to read player names. */}
+      <section className="relative left-1/2 right-1/2 -ml-[50vw] -mr-[50vw] w-screen px-6">
+        <div className="panel mx-auto flex max-w-[1800px] flex-col gap-4 rounded-2xl p-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+          {TIERS.map((t) => {
+            const tierRows = rows.filter((r) => tierOf(r.mmr) === t.n);
+            return (
+              <div
+                key={t.n}
+                className="flex min-w-0 flex-col gap-3 rounded-xl border border-[var(--panel-border)] bg-black/20 p-3"
+              >
+                <div className="flex flex-col gap-0.5 border-b border-[var(--panel-border)] pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold uppercase tracking-wider text-zinc-100">
+                      Tier {t.n}
+                    </span>
+                    <span className="ml-auto rounded-full bg-white/5 px-2 py-0.5 text-[11px] tabular-nums text-zinc-400">
+                      {tierRows.length}
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-zinc-500">{t.range} MMR</span>
+                </div>
+                <div className="flex max-h-[60vh] flex-col gap-2 overflow-y-auto pr-1">
+                  {tierRows.length === 0 ? (
+                    <p className="px-1 py-3 text-center text-[11px] text-zinc-600">No players</p>
+                  ) : (
+                    tierRows.map(renderCard)
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
-        {rows.map((row) => (
-          <div key={row.id} className="grid grid-cols-[1fr_5.5rem_8.5rem_2rem] gap-1.5">
-            <input
-              value={row.name}
-              onChange={(e) => update(row.id, { name: e.target.value })}
-              placeholder="Player name"
-              className="field rounded-md px-2.5 py-1.5 text-[13px]"
-            />
-            <input
-              value={row.mmr}
-              onChange={(e) =>
-                update(row.id, { mmr: e.target.value.replace(/[^0-9]/g, "").slice(0, 5) })
-              }
-              inputMode="numeric"
-              maxLength={5}
-              placeholder="MMR"
-              className="field rounded-md px-2.5 py-1.5 text-[13px] tabular-nums"
-            />
-            <select
-              value={row.role ?? ""}
-              onChange={(e) =>
-                update(row.id, { role: e.target.value ? (Number(e.target.value) as Role) : null })
-              }
-              className="field rounded-md px-1.5 py-1.5 text-[13px]"
-            >
-              <option value="">Any role</option>
-              {ROLES.map((r) => (
-                <option key={r} value={r}>
-                  {r}. {ROLE_LABELS[r]}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={() => removeRow(row.id)}
-              aria-label="Remove player"
-              className="field rounded-md text-xs text-zinc-500 transition-colors hover:border-red-400 hover:text-red-400"
-            >
-              ✕
-            </button>
+        {unrankedRows.length > 0 && (
+          <div className="flex flex-col gap-3 rounded-xl border border-dashed border-[var(--panel-border)] p-3">
+            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+              No MMR yet · {unrankedRows.length}
+            </span>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+              {unrankedRows.map(renderCard)}
+            </div>
           </div>
-        ))}
+        )}
 
         <div className="flex flex-wrap items-center gap-4">
           <button
@@ -441,9 +501,9 @@ export default function Balancer() {
           </button>
           <button
             onClick={() => setBulkOpen((o) => !o)}
-            className="text-sm font-semibold text-[var(--lg-lavender)] transition-opacity hover:opacity-80"
+            className="text-sm font-semibold text-zinc-400 transition-opacity hover:opacity-80"
           >
-            📋 Bulk add
+            Bulk add
           </button>
         </div>
 
@@ -481,6 +541,7 @@ export default function Balancer() {
             </div>
           </div>
         )}
+        </div>
       </section>
 
       {/* Controls */}
@@ -527,7 +588,6 @@ export default function Balancer() {
                 : "border-[var(--panel-border)] text-zinc-400"
           }`}
         >
-          <span>{teamNote.tone === "warn" ? "⚠️" : teamNote.tone === "ok" ? "✓" : "ℹ️"}</span>
           <span>{teamNote.text}</span>
         </div>
       </div>
@@ -535,7 +595,6 @@ export default function Balancer() {
       {/* Teams ready but hidden — reveal on demand */}
       {result && !revealed && (
         <section className="panel flex flex-col items-center gap-4 rounded-2xl py-14 text-center">
-          <span className="text-4xl">🎲</span>
           <p className="text-zinc-400">Teams are ready.</p>
           <button
             onClick={() => setRevealed(true)}
@@ -571,7 +630,6 @@ export default function Balancer() {
                   style={{
                     animationDelay: `${i * 60}ms`,
                     borderColor: accent,
-                    boxShadow: `0 0 22px -12px ${accent}`,
                   }}
                 >
                   <div className="mb-2.5 flex items-baseline justify-between gap-1">

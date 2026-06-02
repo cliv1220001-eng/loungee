@@ -38,11 +38,8 @@ export default async function RootLayout({
         {authed && (
           <header className="sticky top-0 z-20 panel border-x-0 border-t-0">
             <nav className="mx-auto flex w-full max-w-6xl items-center gap-6 px-6 py-3.5">
-              <Link href="/" className="flex items-baseline gap-2 font-extrabold tracking-tight">
-                <span className="gradient-text text-xl">LounGee</span>
-                <span className="hidden text-xs font-medium uppercase tracking-widest text-[var(--lg-lavender)]/70 sm:inline">
-                  Balancer
-                </span>
+              <Link href="/" className="flex items-baseline gap-2 font-semibold tracking-tight">
+                <span className="text-lg">Dota Balancer</span>
               </Link>
               <div className="ml-auto flex items-center gap-1 text-sm">
                 <Link

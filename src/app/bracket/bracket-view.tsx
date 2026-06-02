@@ -18,22 +18,22 @@ import { useTeams } from "@/lib/store";
 import type { Team } from "@/lib/types";
 
 const TEAM_ACCENTS = [
-  "#c45bff",
-  "#e38bff",
-  "#9d4edd",
-  "#ff7ac6",
-  "#b388ff",
-  "#7a5cff",
-  "#d896ff",
-  "#c77dff",
+  "#5a7fa8",
+  "#5a9a78",
+  "#b08a4a",
+  "#b0605a",
+  "#7a86a0",
+  "#5a8f99",
+  "#9a7f5a",
+  "#7f7a9a",
 ];
 
 // Bracket layout geometry (px)
-const COL_W = 232;
-const COL_GAP = 64;
-const MATCH_H = 78;
-const V_GAP = 26;
-const HEADER_H = 30;
+const COL_W = 184;
+const COL_GAP = 40;
+const MATCH_H = 50;
+const V_GAP = 14;
+const HEADER_H = 26;
 
 function mulberry32(seed: number): () => number {
   let s = seed;
@@ -124,7 +124,6 @@ export default function BracketView() {
     return (
       <Shell>
         <div className="panel flex flex-col items-center gap-4 rounded-2xl px-10 py-16 text-center">
-          <span className="text-4xl">🏆</span>
           <h2 className="text-xl font-bold">No teams yet</h2>
           <p className="max-w-sm text-zinc-400">
             Generate balanced teams first, then send them here to run the bracket.
@@ -181,27 +180,27 @@ export default function BracketView() {
                 isLoser ? "opacity-45" : ""
               }`}
             >
-              <span className="flex w-7 shrink-0 items-center justify-center bg-white/[0.04] text-[11px] tabular-nums text-zinc-500">
+              <span className="flex w-5 shrink-0 items-center justify-center bg-white/[0.04] text-[10px] tabular-nums text-zinc-500">
                 {info.muted ? "" : (info.seed ?? "")}
               </span>
-              <span className="flex min-w-0 flex-1 flex-col justify-center px-2 leading-tight">
+              <span className="flex min-w-0 flex-1 items-center px-2">
                 <span
-                  className={`truncate text-[13px] font-bold tracking-wide ${info.muted ? "text-zinc-500" : ""}`}
+                  className={`truncate text-[12px] font-semibold ${
+                    info.muted ? "text-zinc-500" : isWinner ? "text-white" : "text-zinc-300"
+                  }`}
                   style={!info.muted && info.accent ? { color: info.accent } : undefined}
+                  title={info.players}
                 >
                   {info.name}
                 </span>
-                {info.players && (
-                  <span className="truncate text-[10px] text-zinc-500">{info.players}</span>
-                )}
               </span>
               <span
-                className={`flex w-8 shrink-0 items-center justify-center text-sm font-bold tabular-nums ${
-                  isWinner ? "text-[#1a1423]" : "text-zinc-500"
+                className={`flex w-6 shrink-0 items-center justify-center text-[13px] font-bold tabular-nums ${
+                  isWinner ? "text-white" : "text-zinc-500"
                 }`}
                 style={
                   isWinner
-                    ? { background: info.accent ?? "var(--lg-primary)" }
+                    ? { background: "var(--accent)" }
                     : { background: "rgba(255,255,255,0.04)" }
                 }
               >
@@ -216,13 +215,13 @@ export default function BracketView() {
 
   // Columns of match boxes (used for the losers bracket where it isn't a clean binary tree).
   const renderColumns = (cols: typeof groups.wb) => (
-    <div className="flex gap-12">
+    <div className="flex gap-10">
       {cols.map((col) => (
-        <div key={col.id} className="flex flex-col gap-4" style={{ width: COL_W }}>
+        <div key={col.id} className="flex flex-col gap-3" style={{ width: COL_W }}>
           <span className="text-center text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
             {col.title}
           </span>
-          <div className="flex flex-1 flex-col justify-around gap-4">
+          <div className="flex flex-1 flex-col justify-around gap-3">
             {col.matchIds.map((id) => (
               <div key={id}>{renderMatchBox(id)}</div>
             ))}
@@ -313,7 +312,7 @@ export default function BracketView() {
           width={width}
           height={height}
         >
-          <path d={segments.join(" ")} stroke="rgba(196,91,255,0.4)" strokeWidth={2} fill="none" />
+          <path d={segments.join(" ")} stroke="rgba(255,255,255,0.18)" strokeWidth={2} fill="none" />
         </svg>
         {[...pos.entries()].map(([id, p]) => (
           <div
@@ -335,9 +334,8 @@ export default function BracketView() {
       {champion && (
         <div
           className="panel animate-pop mb-2 flex items-center justify-center gap-3 rounded-2xl py-5 text-center"
-          style={{ borderColor: champion.accent, boxShadow: `0 0 40px -10px ${champion.accent}` }}
+          style={{ borderColor: champion.accent }}
         >
-          <span className="text-2xl">🏆</span>
           <span className="text-lg font-extrabold" style={{ color: champion.accent }}>
             Team {champion.team.id} wins the tournament!
           </span>
@@ -363,7 +361,7 @@ export default function BracketView() {
           onClick={reshuffle}
           className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
         >
-          🎲 Shuffle seeds
+          Shuffle seeds
         </button>
 
         <span className="text-sm text-zinc-500">{teams.length} teams</span>

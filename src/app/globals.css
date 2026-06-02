@@ -1,28 +1,26 @@
 @import "tailwindcss";
 
 :root {
-  /* LounGee brand */
-  --lg-bg: #1a1423;
-  --lg-bg-2: #241a32;
-  --lg-fg: #f3eafb;
-  --lg-primary: #c45bff; /* neon purple */
-  --lg-deep: #7a2b9e; /* deep violet */
-  --lg-glow: #e38bff; /* glow magenta */
-  --lg-lavender: #b388ff;
+  --background: #1c1c1e;
+  --foreground: #e9e9ea;
+  --muted: #9a9a9e;
 
-  --background: var(--lg-bg);
-  --foreground: var(--lg-fg);
-  --panel: rgba(255, 255, 255, 0.035);
-  --panel-border: rgba(196, 91, 255, 0.18);
+  --accent: #e8632a; /* challonge orange */
+  --accent-strong: #f4743f;
+
+  --panel: #29292c;
+  --panel-border: rgba(255, 255, 255, 0.08);
+
+  /* Aliases kept so existing inline var() references resolve to the new palette. */
+  --lg-primary: var(--accent);
+  --lg-glow: #f0844f;
+  --lg-lavender: #9a9a9e;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --color-primary: var(--lg-primary);
-  --color-deep: var(--lg-deep);
-  --color-glow: var(--lg-glow);
-  --color-lavender: var(--lg-lavender);
+  --color-accent: var(--accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -35,40 +33,13 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, sans-serif;
-  position: relative;
   overflow-x: hidden;
-}
-
-/* Animated aurora backdrop in brand violet/magenta */
-body::before {
-  content: "";
-  position: fixed;
-  inset: -20vh -20vw;
-  z-index: -1;
-  background:
-    radial-gradient(40vw 40vw at 15% 18%, rgba(196, 91, 255, 0.22), transparent 60%),
-    radial-gradient(45vw 45vw at 85% 12%, rgba(227, 139, 255, 0.16), transparent 60%),
-    radial-gradient(52vw 52vw at 50% 98%, rgba(122, 43, 158, 0.28), transparent 60%);
-  filter: blur(22px);
-  animation: aurora 18s ease-in-out infinite alternate;
-}
-
-@keyframes aurora {
-  0% {
-    transform: translate3d(-3%, -2%, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(3%, 2%, 0) scale(1.08);
-  }
-  100% {
-    transform: translate3d(-2%, 3%, 0) scale(1.03);
-  }
 }
 
 @keyframes fade-up {
   from {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -77,78 +48,50 @@ body::before {
 }
 
 @keyframes pop-in {
-  0% {
+  from {
     opacity: 0;
-    transform: scale(0.9);
+    transform: translateY(6px);
   }
-  60% {
-    transform: scale(1.03);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@keyframes sheen {
   to {
-    background-position: 200% center;
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
 .animate-fade-up {
-  animation: fade-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: fade-up 0.25s ease-out both;
 }
 
 .animate-pop {
-  animation: pop-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: pop-in 0.2s ease-out both;
 }
 
-/* Glassy panel */
+/* Plain card surface */
 .panel {
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 
-/* Gradient brand text */
+/* Headings: kept as a class so call sites need no change, now just solid text. */
 .gradient-text {
-  background: linear-gradient(
-    100deg,
-    var(--lg-glow),
-    var(--lg-primary),
-    var(--lg-lavender),
-    var(--lg-glow)
-  );
-  background-size: 200% auto;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: sheen 6s linear infinite;
+  color: var(--foreground);
 }
 
 /* Primary action button */
 .btn-neon {
-  position: relative;
-  background: linear-gradient(100deg, var(--lg-primary), var(--lg-deep), var(--lg-glow));
-  background-size: 200% auto;
-  color: #1a1423;
-  font-weight: 700;
-  transition: transform 0.15s ease, box-shadow 0.2s ease, background-position 0.4s ease;
-  box-shadow: 0 0 24px -8px var(--lg-primary);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  transition: background-color 0.15s ease;
 }
 .btn-neon:hover:not(:disabled) {
-  background-position: right center;
-  transform: translateY(-1px);
-  box-shadow: 0 0 32px -4px var(--lg-glow);
+  background: var(--accent-strong);
 }
 .btn-neon:active:not(:disabled) {
-  transform: translateY(0) scale(0.98);
+  background: var(--accent);
 }
 .btn-neon:disabled {
-  opacity: 0.35;
-  box-shadow: none;
+  opacity: 0.4;
 }
 
 /* Form fields */
@@ -160,11 +103,11 @@ body::before {
 }
 .field:focus {
   outline: none;
-  border-color: var(--lg-primary);
-  box-shadow: 0 0 0 3px rgba(196, 91, 255, 0.2);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(232, 99, 42, 0.3);
 }
 .field option {
-  background: #1a1423;
+  background: #29292c;
   color: var(--foreground);
 }
 
@@ -177,5 +120,5 @@ body::before {
   border-radius: 999px;
 }
 .bracket-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--lg-primary);
+  background: var(--accent);
 }

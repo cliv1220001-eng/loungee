@@ -18,7 +18,10 @@
       "PowerShell(node \"C:\\\\Users\\\\test\\\\dota-balancer\\\\temp_locks.mts\" 2>$null)",
       "PowerShell(node \"C:\\\\Users\\\\test\\\\dota-balancer\\\\temp_final.mts\" 2>$null)",
       "PowerShell(node \"C:\\\\Users\\\\test\\\\dota-balancer\\\\temp_prob.mts\" 2>$null)",
-      "PowerShell(npm install @supabase/supabase-js 2>&1)"
+      "PowerShell(npm install @supabase/supabase-js 2>&1)",
+      "Bash(grep -iE '\\\\.\\(css|scss|tsx|jsx|ts|js|json\\)$')",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)"
     ]
   }
 }
