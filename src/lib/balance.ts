@@ -96,8 +96,7 @@ function refine(teams: WorkingTeam[]): void {
 function toResult(teams: WorkingTeam[]): BalanceResult {
   const finalTeams: Team[] = teams.map((t) => ({
     id: t.id,
-    // Random order (not sorted by MMR) so locked high-MMR players don't always
-    // cluster at the top of their team and give the rig away.
+    // Random order (not sorted by MMR) so teams don't always present strongest-first.
     players: shuffled(t.players),
     totalMmr: t.totalMmr,
   }));
@@ -233,162 +232,19 @@ function refineSameRole(teams: WorkingTeam[]): void {
   }
 }
 
-// --- Locked pairings --------------------------------------------------------
-// Each group is a set of (case-insensitive) player names that are always forced
-// onto the same team, regardless of mode. Different groups may land on different
-// teams. The rest of the teams are re-balanced around them so the reported
-// spread still looks legit.
-const LOCKED_GROUPS: string[][] = [
-  ["winter", "euruuu", "trevor"],
-  ["vit", "lukasbaby"],
-  ["ed", "th1"],
-];
-
-// Each locked group is forced together on roughly this fraction of shuffles; the
-// rest of the time it's left to a genuine split, so the rigging stays deniable.
-const LOCK_PROBABILITY = 1;
-
-// Lowercase, trim, and collapse runs of the same letter so "tewssss"/"tewsss"
-// and "euruuu"/"euruu" all match regardless of how many times a letter is typed.
-function normName(name: string): string {
-  return name.trim().toLowerCase().replace(/(.)\1+/g, "$1");
-}
-
-function inGroup(group: string[], p: Player): boolean {
-  const n = normName(p.name);
-  return group.some((key) => normName(key) === n);
-}
-
-function isLocked(p: Player): boolean {
-  return LOCKED_GROUPS.some((group) => inGroup(group, p));
-}
-
-/** Local search restricted to non-locked players, so locked picks stay put. */
-function refinePinned(teams: WorkingTeam[]): void {
-  let improved = true;
-  let guard = 0;
-  while (improved && guard < 2000) {
-    improved = false;
-    guard++;
-    for (let a = 0; a < teams.length; a++) {
-      for (let b = a + 1; b < teams.length; b++) {
-        const ta = teams[a];
-        const tb = teams[b];
-        for (let i = 0; i < ta.players.length; i++) {
-          for (let j = 0; j < tb.players.length; j++) {
-            const pa = ta.players[i];
-            const pb = tb.players[j];
-            if (isLocked(pa) || isLocked(pb)) continue;
-            const before = spreadOf(teams);
-            const newTotalA = ta.totalMmr - pa.mmr + pb.mmr;
-            const newTotalB = tb.totalMmr - pb.mmr + pa.mmr;
-            const after = spreadOf(
-              teams.map((t) => {
-                if (t.id === ta.id) return { totalMmr: newTotalA };
-                if (t.id === tb.id) return { totalMmr: newTotalB };
-                return { totalMmr: t.totalMmr };
-              })
-            );
-            if (after < before) {
-              ta.players[i] = pb;
-              tb.players[j] = pa;
-              ta.totalMmr = newTotalA;
-              tb.totalMmr = newTotalB;
-              improved = true;
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-/**
- * Rebuild the teams so every locked group is seated together on its own random
- * distinct team, then fill the remaining slots. Rebuilding (rather than swapping)
- * guarantees the groups stay intact even when many locked players cluster. The
- * random team placement + randomized fill keep each shuffle varied; Random mode
- * fills randomly, the skill modes fill balanced and re-tighten.
- */
-function enforceLockedTogether(result: BalanceResult, mode: BalanceMode): BalanceResult {
-  if (result.teams.length === 0) return result;
-
-  const capacities = result.teams.map((t) => t.players.length);
-  const allPlayers = result.teams.flatMap((t) => t.players);
-
-  const groups = LOCKED_GROUPS.map((g) =>
-    allPlayers.filter((p) => inGroup(g, p))
-  ).filter((members) => members.length >= 2);
-  if (groups.length === 0) return result;
-
-  const teams: WorkingTeam[] = capacities.map((capacity, i) => ({
-    id: result.teams[i].id,
-    players: [],
-    totalMmr: 0,
-    capacity,
-  }));
-
-  // Seat each group on a random distinct team that can hold it — but only on a
-  // ~LOCK_PROBABILITY fraction of shuffles; otherwise let it split genuinely.
-  const order = shuffled(teams.map((_, i) => i));
-  const used = new Set<number>();
-  const seated = new Set<string>();
-  for (const members of groups) {
-    if (Math.random() >= LOCK_PROBABILITY) continue; // this shuffle: leave it to chance
-    const ti = order.find((i) => !used.has(i) && teams[i].capacity >= members.length);
-    if (ti === undefined) continue; // can't seat distinctly → members fall to fill step
-    used.add(ti);
-    for (const m of members) {
-      teams[ti].players.push(m);
-      teams[ti].totalMmr += m.mmr;
-      seated.add(m.id);
-    }
-  }
-
-  const rest = allPlayers.filter((p) => !seated.has(p.id));
-  if (mode === "random") {
-    for (const p of shuffled(rest)) {
-      const slot = teams.find((t) => t.players.length < t.capacity)!;
-      slot.players.push(p);
-      slot.totalMmr += p.mmr;
-    }
-  } else {
-    for (const p of [...rest].sort((a, b) => b.mmr - a.mmr)) {
-      const eligible = teams.filter((t) => t.players.length < t.capacity);
-      const minTotal = Math.min(...eligible.map((t) => t.totalMmr));
-      const candidates = eligible.filter((t) => t.totalMmr === minTotal);
-      const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-      chosen.players.push(p);
-      chosen.totalMmr += p.mmr;
-    }
-    refinePinned(teams);
-  }
-  return toResult(teams);
-}
-
-/**
- * Dispatch to the chosen strategy. When `applyLocks` is true the locked pairings
- * are enforced; pass false to get a genuinely unrigged result (used for the
- * "fair shuffle" preview frames before the final locked reveal).
- */
+/** Dispatch to the chosen balancing strategy. */
 export function generateTeams(
   players: Player[],
   numTeams: number,
-  mode: BalanceMode,
-  applyLocks = true
+  mode: BalanceMode
 ): BalanceResult {
-  let result: BalanceResult;
   switch (mode) {
     case "role":
-      result = balanceByRole(players, numTeams);
-      break;
+      return balanceByRole(players, numTeams);
     case "random":
-      result = randomTeams(players, numTeams);
-      break;
+      return randomTeams(players, numTeams);
     case "mmr":
     default:
-      result = balanceTeams(players, numTeams);
-      break;
+      return balanceTeams(players, numTeams);
   }
-  return applyLocks ? enforceLockedTogether(result, mode) : result;
 }
