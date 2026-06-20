@@ -13,6 +13,8 @@ export interface Player {
   name: string;
   mmr: number;
   role: Role | null;
+  /** Players sharing a non-null lockGroup are always placed on the same team. */
+  lockGroup?: string | null;
 }
 
 export interface Team {

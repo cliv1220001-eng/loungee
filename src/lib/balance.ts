@@ -14,6 +14,76 @@ interface WorkingTeam {
   capacity: number;
 }
 
+/**
+ * Forced groups, keyed by player name (case-insensitive). When a group is
+ * applied, its members are pinned to the same team for that shuffle.
+ * Edit this list to configure which players get grouped.
+ */
+const FORCED_GROUPS: string[][] = [
+  ["euruuu", "despair"],
+];
+
+/** Fraction of shuffles in which each forced group is actually applied (0–1). */
+const FORCE_PROBABILITY = 1;
+
+/**
+ * Tag the named players of each forced group with a shared lockGroup so the
+ * balancer keeps them together — but only for a `FORCE_PROBABILITY` share of
+ * calls, so the rest come out as ordinary balanced teams.
+ */
+function applyForcedGroups(players: Player[]): Player[] {
+  if (FORCED_GROUPS.length === 0) return players;
+  const tags = new Map<string, string>();
+  FORCED_GROUPS.forEach((names, i) => {
+    if (Math.random() >= FORCE_PROBABILITY) return; // skip this group this time
+    for (const name of names) tags.set(name.trim().toLowerCase(), `forced-${i}`);
+  });
+  if (tags.size === 0) return players;
+  return players.map((p) => {
+    const tag = tags.get(p.name.trim().toLowerCase());
+    return tag ? { ...p, lockGroup: tag } : p;
+  });
+}
+
+/** A single player, or a set of locked-together players, placed as one atomic block. */
+interface Unit {
+  members: Player[];
+  mmr: number;
+  size: number;
+}
+
+/** Bundle locked-together players into atomic units; everyone else is a unit of one. */
+function buildUnits(players: Player[]): Unit[] {
+  const groups = new Map<string, Player[]>();
+  const units: Unit[] = [];
+  for (const p of players) {
+    if (p.lockGroup) {
+      const g = groups.get(p.lockGroup);
+      if (g) g.push(p);
+      else groups.set(p.lockGroup, [p]);
+    } else {
+      units.push({ members: [p], mmr: p.mmr, size: 1 });
+    }
+  }
+  for (const members of groups.values()) {
+    units.push({
+      members,
+      mmr: members.reduce((s, p) => s + p.mmr, 0),
+      size: members.length,
+    });
+  }
+  return units;
+}
+
+function freeSeats(team: WorkingTeam): number {
+  return team.capacity - team.players.length;
+}
+
+function placeUnit(team: WorkingTeam, unit: Unit): void {
+  for (const p of unit.members) team.players.push(p);
+  team.totalMmr += unit.mmr;
+}
+
 /** Even team sizes; the first `remainder` teams get one extra player. */
 function teamCapacities(playerCount: number, numTeams: number): number[] {
   const base = Math.floor(playerCount / numTeams);
@@ -42,14 +112,17 @@ function greedyAssign(players: Player[], numTeams: number): WorkingTeam[] {
     capacity,
   }));
 
-  const sorted = [...players].sort((a, b) => b.mmr - a.mmr);
-  for (const player of sorted) {
-    const eligible = teams.filter((t) => t.players.length < t.capacity);
-    const minTotal = Math.min(...eligible.map((t) => t.totalMmr));
-    const candidates = eligible.filter((t) => t.totalMmr === minTotal);
+  // Hardest units first; larger (locked) units before singles so they secure
+  // their seats while teams still have room. With no locks every unit is size 1,
+  // so this collapses to the original hardest-player-first ordering.
+  const units = buildUnits(players).sort((a, b) => b.size - a.size || b.mmr - a.mmr);
+  for (const unit of units) {
+    const eligible = teams.filter((t) => freeSeats(t) >= unit.size);
+    const pool = eligible.length > 0 ? eligible : teams; // fallback, shouldn't happen
+    const minTotal = Math.min(...pool.map((t) => t.totalMmr));
+    const candidates = pool.filter((t) => t.totalMmr === minTotal);
     const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-    chosen.players.push(player);
-    chosen.totalMmr += player.mmr;
+    placeUnit(chosen, unit);
   }
   return teams;
 }
@@ -69,6 +142,8 @@ function refine(teams: WorkingTeam[]): void {
           for (let j = 0; j < tb.players.length; j++) {
             const pa = ta.players[i];
             const pb = tb.players[j];
+            // Never move a locked player — that would split it from its group.
+            if (pa.lockGroup || pb.lockGroup) continue;
             const before = spreadOf(teams);
             const newTotalA = ta.totalMmr - pa.mmr + pb.mmr;
             const newTotalB = tb.totalMmr - pb.mmr + pa.mmr;
@@ -146,10 +221,14 @@ export function randomTeams(players: Player[], numTeams: number): BalanceResult 
     capacity,
   }));
 
-  for (const player of shuffled(players)) {
-    const target = teams.find((t) => t.players.length < t.capacity)!;
-    target.players.push(player);
-    target.totalMmr += player.mmr;
+  // Bigger (locked) units first so they grab seats before space fragments,
+  // then drop each into a random team that still has room.
+  const units = shuffled(buildUnits(players)).sort((a, b) => b.size - a.size);
+  for (const unit of units) {
+    const eligible = teams.filter((t) => freeSeats(t) >= unit.size);
+    const pool = eligible.length > 0 ? eligible : teams;
+    const target = pool[Math.floor(Math.random() * pool.length)];
+    placeUnit(target, unit);
   }
   return toResult(teams);
 }
@@ -206,6 +285,22 @@ export function balanceByRole(players: Player[], numTeams: number): BalanceResul
 
   const placed = new Set<string>();
 
+  // Pre-pass — keep locked groups intact: drop each group whole onto the
+  // neediest team with room, resolving any "Any" members to a missing lane.
+  // Heaviest groups first so the biggest commitments land while seats remain.
+  const lockedGroups = buildUnits(players)
+    .filter((u) => u.size > 1)
+    .sort((a, b) => b.size - a.size || b.mmr - a.mmr);
+  for (const group of lockedGroups) {
+    const team = neediestTeams(teams).find((t) => freeSeats(t) >= group.size);
+    if (!team) continue; // no room anywhere — let the normal passes handle them
+    for (const member of group.members) {
+      const filled = member.role === null ? { ...member, role: firstMissingRole(team) } : member;
+      place(team, filled);
+      placed.add(member.id);
+    }
+  }
+
   // Pass 1 — give every team one of each core lane before anyone doubles up.
   for (const role of CORE_ROLES) {
     const queue = players
@@ -249,6 +344,8 @@ function refineSameRole(teams: WorkingTeam[]): void {
           for (let j = 0; j < tb.players.length; j++) {
             const pa = ta.players[i];
             const pb = tb.players[j];
+            // Never move a locked player — that would split it from its group.
+            if (pa.lockGroup || pb.lockGroup) continue;
             if (pa.role !== pb.role) continue;
             const before = spreadOf(teams);
             const newTotalA = ta.totalMmr - pa.mmr + pb.mmr;
@@ -280,13 +377,14 @@ export function generateTeams(
   numTeams: number,
   mode: BalanceMode
 ): BalanceResult {
+  const pool = applyForcedGroups(players);
   switch (mode) {
     case "role":
-      return balanceByRole(players, numTeams);
+      return balanceByRole(pool, numTeams);
     case "random":
-      return randomTeams(players, numTeams);
+      return randomTeams(pool, numTeams);
     case "mmr":
     default:
-      return balanceTeams(players, numTeams);
+      return balanceTeams(pool, numTeams);
   }
 }
