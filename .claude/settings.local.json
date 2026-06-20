@@ -22,7 +22,10 @@
       "Bash(grep -iE '\\\\.\\(css|scss|tsx|jsx|ts|js|json\\)$')",
       "Bash(npx tsc *)",
       "Bash(npm run *)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(xargs wc -l)",
+      "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1)",
+      "PowerShell(if \\($?\\) { \"TYPECHECK DONE\" })"
     ]
   }
 }

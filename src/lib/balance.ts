@@ -158,12 +158,42 @@ function countRole(team: WorkingTeam, role: Role | null): number {
   return team.players.reduce((n, p) => (p.role === role ? n + 1 : n), 0);
 }
 
+/** The five lanes that make up a "proper" Dota team. */
+const CORE_ROLES: Role[] = [1, 2, 3, 4, 5];
+
+/** How many of the five core lanes this team is still missing (0 = proper). */
+function missingCoreRoles(team: WorkingTeam): number {
+  return CORE_ROLES.reduce((n, r) => (countRole(team, r) === 0 ? n + 1 : n), 0);
+}
+
+/** The lowest-numbered core lane this team lacks, or null if it already has all five. */
+function firstMissingRole(team: WorkingTeam): Role | null {
+  return CORE_ROLES.find((r) => countRole(team, r) === 0) ?? null;
+}
+
+function place(team: WorkingTeam, player: Player): void {
+  team.players.push(player);
+  team.totalMmr += player.mmr;
+}
+
+/** Teams with room, neediest first (most missing lanes), then lowest running MMR. */
+function neediestTeams(teams: WorkingTeam[]): WorkingTeam[] {
+  return teams
+    .filter((t) => t.players.length < t.capacity)
+    .sort((a, b) => missingCoreRoles(b) - missingCoreRoles(a) || a.totalMmr - b.totalMmr);
+}
+
 /**
- * Spread each role as evenly as possible across teams while keeping MMR close.
- * Players are bucketed by role and dealt strongest-first to the team that has
- * the fewest of that role, breaking ties by lowest running MMR. A final pass
- * swaps same-role players between teams to tighten the spread without disturbing
- * the role distribution.
+ * Build teams with a complete, proper set of roles, prioritizing the teams that
+ * still lack the most lanes.
+ *
+ * Pass 1 hands each of the five lanes (strongest first) to the teams that don't
+ * yet have it, so every team works toward one Carry / Mid / Offlane / Soft / Hard
+ * before any team doubles up. Pass 2 spends the leftovers — extra fixed-role
+ * players plus "Any" (no preference) players — on the neediest teams; an "Any"
+ * player adopts whatever lane its team is still missing so the roster comes out
+ * proper. A final pass swaps same-role players to tighten MMR without disturbing
+ * the role layout.
  */
 export function balanceByRole(players: Player[], numTeams: number): BalanceResult {
   const capacities = teamCapacities(players.length, numTeams);
@@ -174,18 +204,30 @@ export function balanceByRole(players: Player[], numTeams: number): BalanceResul
     capacity,
   }));
 
-  const roleBuckets: (Role | null)[] = [1, 2, 3, 4, 5, null];
-  for (const role of roleBuckets) {
-    const inRole = players.filter((p) => p.role === role).sort((a, b) => b.mmr - a.mmr);
-    for (const player of inRole) {
-      const eligible = teams.filter((t) => t.players.length < t.capacity);
-      const minCount = Math.min(...eligible.map((t) => countRole(t, role)));
-      const candidates = eligible.filter((t) => countRole(t, role) === minCount);
-      candidates.sort((a, b) => a.totalMmr - b.totalMmr);
-      const chosen = candidates[0];
-      chosen.players.push(player);
-      chosen.totalMmr += player.mmr;
+  const placed = new Set<string>();
+
+  // Pass 1 — give every team one of each core lane before anyone doubles up.
+  for (const role of CORE_ROLES) {
+    const queue = players
+      .filter((p) => p.role === role && !placed.has(p.id))
+      .sort((a, b) => b.mmr - a.mmr);
+    for (const team of neediestTeams(teams)) {
+      if (countRole(team, role) > 0) continue; // this team already has the lane
+      const player = queue.shift();
+      if (!player) break; // no more players of this lane to hand out
+      place(team, player);
+      placed.add(player.id);
     }
+  }
+
+  // Pass 2 — leftovers fill remaining seats on the neediest teams. An "Any"
+  // player takes on whichever lane its team still lacks so the team comes out proper.
+  const leftovers = players.filter((p) => !placed.has(p.id)).sort((a, b) => b.mmr - a.mmr);
+  for (const player of leftovers) {
+    const team = neediestTeams(teams)[0];
+    if (!team) break;
+    const filled = player.role === null ? { ...player, role: firstMissingRole(team) } : player;
+    place(team, filled);
   }
 
   refineSameRole(teams);
