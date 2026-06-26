@@ -20,7 +20,7 @@ interface WorkingTeam {
  * Edit this list to configure which players get grouped.
  */
 const FORCED_GROUPS: string[][] = [
-  ["euruuu", "despair"],
+  ["euruuu", "Mona"],
 ];
 
 /** Fraction of shuffles in which each forced group is actually applied (0–1). */
