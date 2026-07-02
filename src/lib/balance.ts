@@ -20,7 +20,7 @@ interface WorkingTeam {
  * Edit this list to configure which players get grouped.
  */
 const FORCED_GROUPS: string[][] = [
-  ["euruuu", "winter"],
+  ["euruuu", "mona"],
   ["vit", "Lukasbaby"],
 ];
 
