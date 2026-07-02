@@ -15,6 +15,8 @@ export interface Player {
   role: Role | null;
   /** Players sharing a non-null lockGroup are always placed on the same team. */
   lockGroup?: string | null;
+  /** Registry key (LoungeE Rating is tracked per email, not per IGN). Hidden in the UI. */
+  email?: string | null;
 }
 
 export interface Team {

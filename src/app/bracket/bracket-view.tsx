@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { startingLr } from "@/lib/lr";
 import {
   buildBracket,
   clearWinner,
@@ -14,7 +15,13 @@ import {
   type ResolvedSlot,
   type Side,
 } from "@/lib/bracket";
-import { useTeams } from "@/lib/store";
+import {
+  BRACKET_RUN_KEY,
+  EMPTY_BRACKET_RUN,
+  useTeams,
+  usePersistentState,
+  type BracketRun,
+} from "@/lib/store";
 import type { Team } from "@/lib/types";
 
 const TEAM_ACCENTS = [
@@ -59,15 +66,55 @@ function seededShuffle(ids: number[], seed: number): number[] {
 export default function BracketView() {
   // undefined = loading from storage, null = nothing saved
   const teams = useTeams();
-  const [format, setFormat] = useState<BracketFormat>("single");
-  const [seed, setSeed] = useState(() => Math.floor(Math.random() * 2 ** 31));
-  const [winners, setWinners] = useState<Record<string, Side>>({});
+
+  // Bracket state (format, seed, winners) persists per run so results — and the
+  // LR already applied for them — survive navigating away and back.
+  const [run, setRun] = usePersistentState<BracketRun>(BRACKET_RUN_KEY, EMPTY_BRACKET_RUN);
+  const { format, seed, winners } = run;
+
+  // Mint a run id the first time the bracket is opened without one (e.g. direct nav).
+  useEffect(() => {
+    if (!run.runId) {
+      setRun({
+        runId: crypto.randomUUID(),
+        format: "single",
+        seed: Math.floor(Math.random() * 2 ** 31),
+        winners: {},
+      });
+    }
+  }, [run.runId, setRun]);
 
   const teamsById = useMemo(() => {
     const map = new Map<number, { team: Team; accent: string }>();
     teams?.forEach((t, i) => map.set(t.id, { team: t, accent: TEAM_ACCENTS[i % TEAM_ACCENTS.length] }));
     return map;
   }, [teams]);
+
+  // Current LR per email, kept fresh so the bracket reflects LR as matches decide.
+  const [lrByEmail, setLrByEmail] = useState<Map<string, number>>(new Map());
+  const refreshLr = useCallback(() => {
+    fetch("/api/players")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b) => {
+        if (!b?.players) return;
+        const m = new Map<string, number>();
+        for (const p of b.players as { email: string; lr: number }[]) m.set(p.email, p.lr);
+        setLrByEmail(m);
+      })
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    refreshLr();
+  }, [refreshLr]);
+
+  // A player's current LR (falls back to their starting LR until the DB knows them).
+  const lrOf = useCallback(
+    (mmr: number, email: string | null | undefined) => {
+      const key = (email ?? "").trim().toLowerCase();
+      return key && lrByEmail.has(key) ? lrByEmail.get(key)! : startingLr(mmr);
+    },
+    [lrByEmail]
+  );
 
   const order = useMemo(
     () => (teams ? seededShuffle(teams.map((t) => t.id), seed) : []),
@@ -97,24 +144,70 @@ export default function BracketView() {
       : null;
 
   function reshuffle() {
-    setSeed((s) => s + 1);
-    setWinners({});
+    setRun((r) => ({ ...r, seed: r.seed + 1, winners: {} }));
   }
 
   function changeFormat(next: BracketFormat) {
-    setFormat(next);
-    setWinners({});
+    setRun((r) => ({ ...r, format: next, winners: {} }));
   }
 
   function pick(matchId: string, side: Side) {
     if (!bracket) return;
     const current = winners[matchId];
-    setWinners(
+    const nextWinners =
       current === side
         ? clearWinner(bracket, winners, matchId)
-        : setWinner(bracket, winners, matchId, side)
-    );
+        : setWinner(bracket, winners, matchId, side);
+    setRun((r) => ({ ...r, winners: nextWinners }));
   }
+
+  // Live LR sync: on every decision (pick / undo / reshuffle / format change),
+  // push the FULL current set of decided real-team matches for this run. The
+  // server full-replaces the run's LR events, so LR always tracks the bracket.
+  useEffect(() => {
+    if (!run.runId || !bracket || !teams) return;
+
+    const emailsOf = (teamId: number | null): string[] =>
+      teamId == null
+        ? []
+        : (teamsById.get(teamId)?.team.players ?? [])
+            .map((p) => (p.email ?? "").trim().toLowerCase())
+            .filter((e) => e !== "");
+
+    const matches = Object.values(resolved)
+      .filter((rm) => rm.decided && rm.a.teamId != null && rm.b.teamId != null)
+      .map((rm) => {
+        const winnerId = rm.winner === "a" ? rm.a.teamId : rm.b.teamId;
+        const loserId = rm.winner === "a" ? rm.b.teamId : rm.a.teamId;
+        return {
+          matchId: rm.id,
+          championMatch: rm.id === bracket.championMatchId,
+          winnerEmails: emailsOf(winnerId),
+          loserEmails: emailsOf(loserId),
+        };
+      });
+
+    const players = teams
+      .flatMap((t) => t.players)
+      .filter((p) => (p.email ?? "").trim() !== "")
+      .map((p) => ({
+        email: (p.email ?? "").trim().toLowerCase(),
+        ign: p.name,
+        mmr: p.mmr,
+        position: p.role,
+      }));
+
+    const ctrl = new AbortController();
+    fetch("/api/lr/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: run.runId, players, matches }),
+      signal: ctrl.signal,
+    })
+      .then(() => refreshLr()) // pull the recomputed LR back so the bracket updates
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [run.runId, resolved, bracket, teams, teamsById, refreshLr]);
 
   if (teams === undefined) {
     return <Shell><p className="text-zinc-500">Loading bracket…</p></Shell>;
@@ -143,15 +236,21 @@ export default function BracketView() {
   };
 
   const slotInfo = (slot: ResolvedSlot) => {
-    if (slot.bye) return { name: "Bye", muted: true, seed: undefined, accent: undefined, players: undefined };
-    if (slot.teamId == null)
-      return { name: "TBD", muted: true, seed: undefined, accent: undefined, players: undefined };
+    const blank = { name: "", muted: true, seed: undefined, accent: undefined, detail: undefined, lr: undefined };
+    if (slot.bye) return { ...blank, name: "Bye" };
+    if (slot.teamId == null) return { ...blank, name: "TBD" };
     const entry = teamsById.get(slot.teamId);
+    if (!entry) return { ...blank, name: `Team ${slot.teamId}`, muted: false };
+    const lr = entry.team.players.reduce((sum, p) => sum + lrOf(p.mmr, p.email), 0);
+    const detail = entry.team.players
+      .map((p) => `${p.name} — ${lrOf(p.mmr, p.email)} LR`)
+      .join("\n");
     return {
-      name: entry ? `Team ${entry.team.id}` : `Team ${slot.teamId}`,
+      name: `Team ${entry.team.id}`,
       seed: seedByTeamId.get(slot.teamId),
-      accent: entry?.accent,
-      players: entry ? entry.team.players.map((p) => p.name).join(", ") : undefined,
+      accent: entry.accent,
+      detail,
+      lr,
       muted: false,
     };
   };
@@ -183,16 +282,20 @@ export default function BracketView() {
               <span className="flex w-5 shrink-0 items-center justify-center bg-white/[0.04] text-[10px] tabular-nums text-zinc-500">
                 {info.muted ? "" : (info.seed ?? "")}
               </span>
-              <span className="flex min-w-0 flex-1 items-center px-2">
+              <span className="flex min-w-0 flex-1 items-center gap-1.5 px-2" title={info.detail}>
                 <span
                   className={`truncate text-[12px] font-semibold ${
                     info.muted ? "text-zinc-500" : isWinner ? "text-white" : "text-zinc-300"
                   }`}
                   style={!info.muted && info.accent ? { color: info.accent } : undefined}
-                  title={info.players}
                 >
                   {info.name}
                 </span>
+                {info.lr != null && (
+                  <span className="ml-auto shrink-0 text-[10px] font-semibold tabular-nums text-zinc-500">
+                    {info.lr} LR
+                  </span>
+                )}
               </span>
               <span
                 className={`flex w-6 shrink-0 items-center justify-center text-[13px] font-bold tabular-nums ${

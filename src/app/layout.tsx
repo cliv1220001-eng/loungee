@@ -54,6 +54,12 @@ export default async function RootLayout({
                 >
                   Bracket
                 </Link>
+                <Link
+                  href="/leaderboard"
+                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  Leaderboard
+                </Link>
                 <LogoutButton />
               </div>
             </nav>

@@ -1,16 +1,42 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { generateTeams, type BalanceMode, type BalanceResult } from "@/lib/balance";
-import { saveTeams, usePersistentState } from "@/lib/store";
-import { ROLE_LABELS, type Player, type Role } from "@/lib/types";
+import { startingLr } from "@/lib/lr";
+import { saveTeams, startBracketRun, usePersistentState } from "@/lib/store";
+import { ROLE_LABELS, type Player, type Role, type Team } from "@/lib/types";
 
 interface DraftPlayer {
   id: string;
   name: string;
   mmr: string;
   role: Role | null;
+  /** Hidden registry key — LR is tracked per email. Set via bulk paste. */
+  email: string | null;
+}
+
+/** Registry payload derived from teams (only players that carry an email). */
+function registryFromTeams(teams: Team[]) {
+  return teams
+    .flatMap((t) => t.players)
+    .filter((p) => (p.email ?? "").trim() !== "")
+    .map((p) => ({
+      email: (p.email ?? "").trim().toLowerCase(),
+      ign: p.name,
+      mmr: p.mmr,
+      position: p.role,
+    }));
+}
+
+/** Fire-and-forget: register/refresh players so the leaderboard knows them. */
+function registerPlayers(players: ReturnType<typeof registryFromTeams>): void {
+  if (players.length === 0) return;
+  void fetch("/api/players", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ players }),
+  }).catch(() => {});
 }
 
 const ROLES: Role[] = [1, 2, 3, 4, 5];
@@ -46,11 +72,11 @@ function tierOf(mmr: string): number | null {
 
 // Newly-added rows get a collision-proof id (restored rows keep their stored ids).
 function makeRow(): DraftPlayer {
-  return { id: crypto.randomUUID(), name: "", mmr: "", role: null };
+  return { id: crypto.randomUUID(), name: "", mmr: "", role: null, email: null };
 }
 // Default rows use deterministic ids so server and client first render match.
 function blankRows(n: number): DraftPlayer[] {
-  return Array.from({ length: n }, (_, i) => ({ id: `row-${i}`, name: "", mmr: "", role: null }));
+  return Array.from({ length: n }, (_, i) => ({ id: `row-${i}`, name: "", mmr: "", role: null, email: null }));
 }
 
 interface BalancerSession {
@@ -61,6 +87,15 @@ interface BalancerSession {
 
 const SESSION_KEY = "dota-balancer:session";
 const DEFAULT_SESSION: BalancerSession = { rows: blankRows(10), mode: "mmr", result: null };
+
+// The tournament currently being worked on. Its roster/teams auto-save under this
+// name so it can be reloaded from history later.
+interface CurrentTournament {
+  id: string | null;
+  name: string;
+}
+const CURRENT_KEY = "dota-balancer:tournament";
+const NO_TOURNAMENT: CurrentTournament = { id: null, name: "" };
 
 function parseRole(token: string | undefined): Role | null {
   if (!token) return null;
@@ -77,29 +112,49 @@ function parseRole(token: string | undefined): Role | null {
   return null;
 }
 
-/** Parse pasted spreadsheet rows: "Name<TAB>MMR<TAB>Role" (also accepts comma or space). */
-function parseBulk(text: string): { name: string; mmr: string; role: Role | null }[] {
-  const out: { name: string; mmr: string; role: Role | null }[] = [];
+interface BulkRow {
+  email: string | null;
+  name: string;
+  mmr: string;
+  role: Role | null;
+}
+
+/**
+ * Parse pasted spreadsheet rows. Preferred format (from the host):
+ *   Email <TAB> IGN <TAB> MMR <TAB> Position
+ * A leading email column is auto-detected (contains "@"); rows without one fall
+ * back to the legacy "IGN <TAB> MMR <TAB> Role". Accepts tab or comma; a plain
+ * "IGN MMR Role" single-space line is also understood (no email).
+ */
+function parseBulk(text: string): BulkRow[] {
+  const out: BulkRow[] = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
 
     let cols: string[];
+    let delimited = true;
     if (line.includes("\t")) cols = line.split("\t");
     else if (line.includes(",")) cols = line.split(",");
     else {
+      delimited = false;
       const m = line.match(/^(.*?)\s+(\d{1,5})\s*(.*)$/);
       cols = m ? [m[1], m[2], m[3]] : [line];
     }
     cols = cols.map((c) => c.trim());
 
-    const name = cols[0];
-    if (!name) continue;
-    // Skip a header row like "Players | MMR | Role".
-    if (/^players?$/i.test(name) && /mmr/i.test(cols[1] ?? "")) continue;
+    // Skip a header row (any cell literally "mmr").
+    if (cols.some((c) => /^mmr$/i.test(c))) continue;
 
-    const mmr = (cols[1] ?? "").replace(/[^0-9]/g, "").slice(0, 5);
-    out.push({ name, mmr, role: parseRole(cols[2]) });
+    const hasEmail = delimited && cols[0].includes("@");
+    const email = hasEmail ? cols[0].toLowerCase() : null;
+    const name = hasEmail ? cols[1] ?? "" : cols[0];
+    const mmrCol = hasEmail ? cols[2] : cols[1];
+    const roleCol = hasEmail ? cols[3] : cols[2];
+    if (!name) continue;
+
+    const mmr = (mmrCol ?? "").replace(/[^0-9]/g, "").slice(0, 5);
+    out.push({ email, name, mmr, role: parseRole(roleCol) });
   }
   return out;
 }
@@ -122,13 +177,37 @@ export default function Balancer() {
   const [bulkText, setBulkText] = useState("");
 
   // Saved tournaments (Supabase-backed).
-  const [tournamentName, setTournamentName] = useState("");
+  const [current, setCurrent] = usePersistentState<CurrentTournament>(CURRENT_KEY, NO_TOURNAMENT);
+  const [newName, setNewName] = useState("");
   const [savedList, setSavedList] = useState<{ id: string; name: string; created_at: string }[] | null>(null);
   const [tourneyBusy, setTourneyBusy] = useState(false);
   const [tourneyMsg, setTourneyMsg] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
-  // Load the saved tournaments once on mount so they show on the homepage.
+  // Current LR per email, so the results cards can show LR in place of MMR.
+  const [lrByEmail, setLrByEmail] = useState<Map<string, number>>(new Map());
+  const refreshLr = useCallback(() => {
+    fetch("/api/players")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b) => {
+        if (!b?.players) return;
+        const m = new Map<string, number>();
+        for (const p of b.players as { email: string; lr: number }[]) m.set(p.email, p.lr);
+        setLrByEmail(m);
+      })
+      .catch(() => {});
+  }, []);
+  const lrOf = useCallback(
+    (mmr: number, email: string | null | undefined) => {
+      const key = (email ?? "").trim().toLowerCase();
+      return key && lrByEmail.has(key) ? lrByEmail.get(key)! : startingLr(mmr);
+    },
+    [lrByEmail]
+  );
+
+  // Load the saved tournament list + current LR on mount.
   useEffect(() => {
+    refreshLr();
     let active = true;
     fetch("/api/tournaments")
       .then((r) => (r.ok ? r.json() : null))
@@ -139,16 +218,38 @@ export default function Balancer() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [refreshLr]);
+
+  // Auto-save the working session to the current tournament (debounced) so its
+  // history is always up to date and reloadable.
+  useEffect(() => {
+    if (!current.id) return;
+    const t = window.setTimeout(async () => {
+      setSaveState("saving");
+      try {
+        const res = await fetch(`/api/tournaments/${current.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: current.name, data: session }),
+        });
+        if (!res.ok) throw new Error();
+        setSaveState("saved");
+      } catch {
+        setSaveState("error");
+      }
+    }, 1200);
+    return () => window.clearTimeout(t);
+  }, [session, current.id, current.name]);
 
   const ready = useMemo(() => {
     const valid = rows.filter(
       (r) => r.name.trim() !== "" && r.mmr.trim() !== "" && !Number.isNaN(Number(r.mmr))
     );
-    // Drop duplicate names (keep first) so no one is counted or placed twice.
+    // Drop duplicates (keep first) so no one is counted or placed twice. Email is
+    // the identity when present (IGNs can repeat / change); otherwise fall back to name.
     const seen = new Set<string>();
     return valid.filter((r) => {
-      const key = r.name.trim().toLowerCase();
+      const key = (r.email ?? "").trim().toLowerCase() || r.name.trim().toLowerCase();
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -199,11 +300,22 @@ export default function Balancer() {
       setBulkOpen(false);
       return;
     }
-    const added = parsed.map((p) => ({ ...makeRow(), name: p.name, mmr: p.mmr, role: p.role }));
+    const added = parsed.map((p) => ({ ...makeRow(), name: p.name, mmr: p.mmr, role: p.role, email: p.email }));
     setRows((prev) => {
       const filled = prev.filter((r) => r.name.trim() !== "" || r.mmr.trim() !== "");
       return [...filled, ...added];
     });
+    // Register the pasted players by email so their IGN/LR persist across events.
+    registerPlayers(
+      added
+        .filter((r) => (r.email ?? "").trim() !== "" && r.name.trim() !== "")
+        .map((r) => ({
+          email: (r.email ?? "").trim().toLowerCase(),
+          ign: r.name.trim(),
+          mmr: Math.round(Number(r.mmr) || 0),
+          position: r.role,
+        }))
+    );
     setBulkText("");
     setBulkOpen(false);
   }
@@ -219,6 +331,7 @@ export default function Balancer() {
       name: r.name.trim(),
       mmr: Math.round(Number(r.mmr)),
       role: r.role,
+      email: (r.email ?? "").trim().toLowerCase() || null,
     }));
 
     // Brief loading beat so the shuffle is visibly "working".
@@ -234,32 +347,13 @@ export default function Balancer() {
   function sendToBracket() {
     if (!result) return;
     saveTeams(result.teams);
+    // Group this bracket's LR/match history under the tournament id.
+    startBracketRun(current.id ?? undefined);
+    registerPlayers(registryFromTeams(result.teams));
     router.push("/bracket");
   }
 
-  async function saveTournament() {
-    const name = tournamentName.trim();
-    if (!name || tourneyBusy) return;
-    setTourneyBusy(true);
-    setTourneyMsg(null);
-    try {
-      const res = await fetch("/api/tournaments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, data: session }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error ?? "Save failed.");
-      setTourneyMsg(`Saved "${name}".`);
-      void refreshList(); // update the on-page list
-    } catch (e) {
-      setTourneyMsg(e instanceof Error ? e.message : "Save failed.");
-    }
-    setTourneyBusy(false);
-  }
-
   async function refreshList() {
-    setTourneyBusy(true);
     try {
       const res = await fetch("/api/tournaments");
       const body = await res.json().catch(() => ({}));
@@ -269,7 +363,55 @@ export default function Balancer() {
       setSavedList([]);
       setTourneyMsg(e instanceof Error ? e.message : "Could not load list.");
     }
+  }
+
+  // Create a fresh tournament and make it the active one (blank roster).
+  async function startTournament() {
+    const name = newName.trim();
+    if (!name || tourneyBusy) return;
+    setTourneyBusy(true);
+    setTourneyMsg(null);
+    try {
+      const fresh: BalancerSession = { rows: blankRows(10), mode: "mmr", result: null };
+      const res = await fetch("/api/tournaments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, data: fresh }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error ?? "Could not create tournament.");
+      setSession(fresh);
+      setRevealed(false);
+      setNewName("");
+      setSaveState("saved");
+      setCurrent({ id: body.tournament.id, name: body.tournament.name });
+    } catch (e) {
+      setTourneyMsg(e instanceof Error ? e.message : "Create failed.");
+    }
     setTourneyBusy(false);
+  }
+
+  // Force an immediate save of the current tournament.
+  async function saveNow() {
+    if (!current.id) return;
+    setSaveState("saving");
+    try {
+      const res = await fetch(`/api/tournaments/${current.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: current.name, data: session }),
+      });
+      if (!res.ok) throw new Error();
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+    }
+  }
+
+  // Leave the current tournament and go back to the picker (work stays saved).
+  function switchTournament() {
+    setCurrent(NO_TOURNAMENT);
+    void refreshList();
   }
 
   async function loadTournament(id: string, name: string) {
@@ -283,8 +425,8 @@ export default function Balancer() {
       if (data && Array.isArray(data.rows)) {
         setSession({ rows: data.rows, mode: data.mode ?? "mmr", result: data.result ?? null });
         setRevealed(Boolean(data.result));
-        setTournamentName(name);
-        setTourneyMsg(`Loaded "${name}".`);
+        setSaveState("saved");
+        setCurrent({ id, name });
       } else {
         setTourneyMsg("That tournament has no saved roster.");
       }
@@ -299,6 +441,7 @@ export default function Balancer() {
     try {
       await fetch(`/api/tournaments/${id}`, { method: "DELETE" });
       setSavedList((prev) => (prev ? prev.filter((t) => t.id !== id) : prev));
+      if (current.id === id) setCurrent(NO_TOURNAMENT);
     } catch {
       setTourneyMsg("Delete failed.");
     }
@@ -355,6 +498,82 @@ export default function Balancer() {
 
   const unrankedRows = rows.filter((r) => tierOf(r.mmr) === null);
 
+  // Gate: pick or create a tournament before building a roster.
+  if (!current.id) {
+    return (
+      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 py-16">
+        <header className="flex flex-col gap-3 text-center">
+          <h1 className="gradient-text text-4xl font-extrabold tracking-tight sm:text-5xl">
+            New Tournament
+          </h1>
+          <p className="text-zinc-400">
+            Loungee Tournament
+          </p>
+        </header>
+
+        <div className="panel flex flex-col gap-3 rounded-2xl p-5">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void startTournament();
+            }}
+            className="flex flex-wrap items-center gap-2"
+          >
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="e.g. Micro Tournament #1"
+              autoFocus
+              className="field min-w-48 flex-1 rounded-lg px-3 py-2.5 text-sm"
+            />
+            <button
+              type="submit"
+              disabled={tourneyBusy || newName.trim() === ""}
+              className="btn-neon rounded-full px-6 py-2.5 text-sm"
+            >
+              Start →
+            </button>
+          </form>
+          {tourneyMsg && <p className="text-xs text-red-300">{tourneyMsg}</p>}
+        </div>
+
+        <div className="panel flex flex-col gap-1.5 rounded-2xl p-5">
+          <span className="px-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            History
+          </span>
+          {savedList === null ? (
+            <p className="text-sm text-zinc-500">Loading…</p>
+          ) : savedList.length === 0 ? (
+            <p className="text-sm text-zinc-500">No saved tournaments yet.</p>
+          ) : (
+            savedList.map((t) => (
+              <div key={t.id} className="flex items-center gap-2 text-sm">
+                <button
+                  onClick={() => loadTournament(t.id, t.name)}
+                  disabled={tourneyBusy}
+                  className="flex-1 truncate rounded-md px-2 py-2 text-left transition-colors hover:bg-white/5"
+                >
+                  <span className="font-semibold">{t.name}</span>
+                  <span className="ml-2 text-xs text-zinc-500">
+                    {new Date(t.created_at).toLocaleDateString()}
+                  </span>
+                </button>
+                <button
+                  onClick={() => deleteTournament(t.id)}
+                  disabled={tourneyBusy}
+                  aria-label="Delete tournament"
+                  className="rounded-md px-2 py-2 text-zinc-500 transition-colors hover:text-red-400"
+                >
+                  ✕
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-10 px-6 py-12">
       <header className="flex flex-col gap-3 text-center sm:text-left">
@@ -362,64 +581,42 @@ export default function Balancer() {
           Build Balanced Teams
         </h1>
         <p className="max-w-xl text-zinc-400">
-          Drop in your players with their MMR and role, pick how to split them, then push the
-          rosters straight into a tournament bracket.
+          Loungee Tournament Organizer.
         </p>
       </header>
 
-      {/* Tournament save / load */}
-      <div className="panel flex flex-col gap-3 rounded-2xl p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            value={tournamentName}
-            onChange={(e) => setTournamentName(e.target.value)}
-            placeholder="Tournament name"
-            className="field min-w-48 flex-1 rounded-lg px-3 py-2 text-sm"
-          />
+      {/* Active tournament */}
+      <div className="panel flex flex-wrap items-center gap-3 rounded-2xl p-4">
+        <div className="flex min-w-0 flex-col">
+          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            Tournament
+          </span>
+          <span className="truncate text-lg font-bold text-zinc-100">{current.name}</span>
+        </div>
+        <span className="text-xs text-zinc-500">
+          {saveState === "saving"
+            ? "Saving…"
+            : saveState === "saved"
+              ? "All changes saved"
+              : saveState === "error"
+                ? "Save failed — retrying on next edit"
+                : ""}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
           <button
-            onClick={saveTournament}
-            disabled={tourneyBusy || tournamentName.trim() === ""}
-            className="btn-neon rounded-full px-5 py-2 text-sm"
+            onClick={saveNow}
+            disabled={saveState === "saving"}
+            className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
           >
-            Save
+            Save now
+          </button>
+          <button
+            onClick={switchTournament}
+            className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+          >
+            Switch
           </button>
         </div>
-
-        {tourneyMsg && <p className="text-xs text-[var(--lg-glow)]">{tourneyMsg}</p>}
-
-        {savedList && (
-          <div className="flex flex-col gap-1.5 border-t border-[var(--panel-border)] pt-3">
-            <span className="px-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">
-              Past tournaments
-            </span>
-            {savedList.length === 0 ? (
-              <p className="text-sm text-zinc-500">No saved tournaments yet.</p>
-            ) : (
-              savedList.map((t) => (
-                <div key={t.id} className="flex items-center gap-2 text-sm">
-                  <button
-                    onClick={() => loadTournament(t.id, t.name)}
-                    disabled={tourneyBusy}
-                    className="flex-1 truncate rounded-md px-2 py-1.5 text-left transition-colors hover:bg-white/5"
-                  >
-                    <span className="font-semibold">{t.name}</span>
-                    <span className="ml-2 text-xs text-zinc-500">
-                      {new Date(t.created_at).toLocaleDateString()}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => deleteTournament(t.id)}
-                    disabled={tourneyBusy}
-                    aria-label="Delete tournament"
-                    className="rounded-md px-2 py-1.5 text-zinc-500 transition-colors hover:text-red-400"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        )}
       </div>
 
       {/* Mode selector */}
@@ -511,14 +708,14 @@ export default function Balancer() {
           <div className="animate-fade-up flex flex-col gap-2 rounded-xl border border-[var(--panel-border)] bg-white/[0.02] p-3">
             <p className="text-xs text-zinc-400">
               Paste rows from Google Sheets / Excel — columns:{" "}
-              <span className="text-zinc-300">Name · MMR · Role</span> (tab or comma separated, role
-              optional).
+              <span className="text-zinc-300">Email · IGN · MMR · Position</span> (tab or comma
+              separated). Email is stored to track LR and is never shown; position optional.
             </p>
             <textarea
               value={bulkText}
               onChange={(e) => setBulkText(e.target.value)}
               rows={6}
-              placeholder={"leunibers\t6000\ncarry Jay\t3700\t1\nJULIA MAE\t1900"}
+              placeholder={"euru@mail.com\teuruuu\t6000\t1\nwinter@mail.com\twinter\t3700\t2\njmae@mail.com\tJULIA MAE\t1900"}
               className="field min-h-32 w-full rounded-lg px-3 py-2 font-mono text-xs"
             />
             <div className="flex justify-end gap-2">
@@ -654,7 +851,12 @@ export default function Balancer() {
                           )}
                           <span className="truncate font-medium">{p.name}</span>
                         </span>
-                        <span className="shrink-0 tabular-nums text-zinc-400">{p.mmr}</span>
+                        <span
+                          title={`${p.mmr} MMR`}
+                          className="shrink-0 tabular-nums text-zinc-400"
+                        >
+                          {lrOf(p.mmr, p.email)} LR
+                        </span>
                       </li>
                     ))}
                   </ul>

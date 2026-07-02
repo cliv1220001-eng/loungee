@@ -3,6 +3,44 @@ import type { Team } from "./types";
 
 const TEAMS_KEY = "dota-balancer:teams";
 
+// --- Bracket run ------------------------------------------------------------
+// A "run" is one trip through the bracket for a set of teams. It has a stable
+// id so LoungeE Rating changes can be attributed to it (and re-synced on every
+// pick), plus the persisted bracket UI state so results survive navigation.
+
+export const BRACKET_RUN_KEY = "dota-balancer:run";
+
+export interface BracketRun {
+  runId: string;
+  format: "single" | "double";
+  seed: number;
+  /** matchId -> winning side. */
+  winners: Record<string, "a" | "b">;
+}
+
+/** Deterministic default (no id yet) so SSR/hydration match; a real run is
+ *  minted client-side by startBracketRun() or lazily on the bracket page. */
+export const EMPTY_BRACKET_RUN: BracketRun = { runId: "", format: "single", seed: 0, winners: {} };
+
+/**
+ * Mint a fresh bracket run (called when new teams are sent to the bracket).
+ * Pass the tournament id so its LR/match history is grouped under that
+ * tournament; without one a random id is used.
+ */
+export function startBracketRun(runId?: string): void {
+  try {
+    const run: BracketRun = {
+      runId: runId && runId.trim() !== "" ? runId : crypto.randomUUID(),
+      format: "single",
+      seed: Math.floor(Math.random() * 2 ** 31),
+      winners: {},
+    };
+    localStorage.setItem(BRACKET_RUN_KEY, JSON.stringify(run));
+  } catch {
+    // localStorage unavailable — the bracket page will mint one on load.
+  }
+}
+
 /** Persist the balanced teams so the bracket page can pick them up. */
 export function saveTeams(teams: Team[]): void {
   try {

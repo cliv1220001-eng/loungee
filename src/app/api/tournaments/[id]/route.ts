@@ -26,6 +26,31 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
   }
 }
 
+// Update a tournament's saved payload (and optionally its name).
+export async function PUT(req: NextRequest, { params }: Ctx) {
+  try {
+    const { id } = await params;
+    const body = (await req.json()) as { name?: string; data?: unknown };
+    const patch: Record<string, unknown> = {};
+    if (typeof body.name === "string" && body.name.trim() !== "") patch.name = body.name.trim();
+    if (body.data !== undefined) patch.data = body.data;
+    if (Object.keys(patch).length === 0) {
+      return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
+    }
+    const sb = getSupabase();
+    const { data, error } = await sb
+      .from("tournaments")
+      .update(patch)
+      .eq("id", id)
+      .select("id,name,created_at")
+      .single();
+    if (error) throw new Error(error.message);
+    return NextResponse.json({ tournament: data });
+  } catch (e) {
+    return errorResponse(e);
+  }
+}
+
 // Delete a tournament.
 export async function DELETE(_req: NextRequest, { params }: Ctx) {
   try {
