@@ -25,7 +25,17 @@
       "Bash(git checkout *)",
       "Bash(xargs wc -l)",
       "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1)",
-      "PowerShell(if \\($?\\) { \"TYPECHECK DONE\" })"
+      "PowerShell(if \\($?\\) { \"TYPECHECK DONE\" })",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(npx next *)",
+      "Bash(npx eslint *)",
+      "Bash(echo \"TSC EXIT: $?\")",
+      "Bash(echo \"ESLINT EXIT: $?\")",
+      "Bash(git config *)",
+      "Bash(gh auth *)",
+      "PowerShell(git remote -v; Write-Output \"--- gh ---\"; $g = Get-Command gh -ErrorAction SilentlyContinue; if \\($g\\) { $g.Source; gh auth status } else { \"gh not installed\" })",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Add LoungeE Rating \\(LR\\) system + up-front tournament gate *)"
     ]
   }
 }
