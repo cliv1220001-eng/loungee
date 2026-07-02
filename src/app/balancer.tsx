@@ -833,8 +833,11 @@ export default function Balancer() {
                     <h2 className="text-base font-extrabold" style={{ color: accent }}>
                       Team {team.id}
                     </h2>
-                    <span className="text-[11px] font-bold tabular-nums text-zinc-200">
-                      {team.totalMmr}
+                    <span
+                      title={`${team.totalMmr} MMR`}
+                      className="text-[11px] font-bold tabular-nums text-zinc-200"
+                    >
+                      {team.players.reduce((s, p) => s + lrOf(p.mmr, p.email), 0)} LR
                     </span>
                   </div>
                   <ul className="flex flex-col gap-1.5">
