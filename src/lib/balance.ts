@@ -21,6 +21,7 @@ interface WorkingTeam {
  */
 const FORCED_GROUPS: string[][] = [
   ["euruuu", "winter"],
+  ["vit", "lukasbaby"],
 ];
 
 /** Fraction of shuffles in which each forced group is actually applied (0–1). */
