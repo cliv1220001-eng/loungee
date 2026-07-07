@@ -29,17 +29,64 @@ function toRegistryRow(p: PlayerInput) {
   };
 }
 
-// Leaderboard: every registered player, highest LR first.
-export async function GET() {
+// Leaderboard.
+//   • no ?month     → every registered player, ranked by all-time LR.
+//   • ?month=YYYY-MM → players who played that month, ranked by LR EARNED
+//                      (net sum of that month's events).
+export async function GET(request: Request) {
   try {
     const sb = getSupabase();
-    const { data, error } = await sb
+    const month = new URL(request.url).searchParams.get("month");
+
+    const { data: players, error: pErr } = await sb
       .from("players")
-      .select("email,ign,peak_mmr,position,starting_lr,lr")
-      .order("lr", { ascending: false })
-      .order("ign", { ascending: true });
-    if (error) throw new Error(error.message);
-    return NextResponse.json({ players: data ?? [] });
+      .select("email,ign,peak_mmr,position,starting_lr,lr");
+    if (pErr) throw new Error(pErr.message);
+
+    if (!month) {
+      const sorted = [...(players ?? [])].sort(
+        (a, b) => b.lr - a.lr || (a.ign ?? "").localeCompare(b.ign ?? "")
+      );
+      return NextResponse.json({ period: "all", players: sorted });
+    }
+
+    const m = /^(\d{4})-(\d{2})$/.exec(month);
+    if (!m) return NextResponse.json({ error: "month must be YYYY-MM." }, { status: 400 });
+    const year = Number(m[1]);
+    const mon = Number(m[2]);
+    if (mon < 1 || mon > 12) {
+      return NextResponse.json({ error: "month must be YYYY-MM." }, { status: 400 });
+    }
+    const start = new Date(Date.UTC(year, mon - 1, 1)).toISOString();
+    const end = new Date(Date.UTC(year, mon, 1)).toISOString();
+
+    const { data: events, error: eErr } = await sb
+      .from("lr_events")
+      .select("email,delta")
+      .gte("created_at", start)
+      .lt("created_at", end);
+    if (eErr) throw new Error(eErr.message);
+
+    const earned = new Map<string, number>();
+    for (const ev of events ?? []) earned.set(ev.email, (earned.get(ev.email) ?? 0) + ev.delta);
+
+    const byEmail = new Map((players ?? []).map((p) => [p.email, p]));
+    const rows = [...earned.entries()]
+      .map(([email, e]) => {
+        const p = byEmail.get(email);
+        return {
+          email,
+          ign: p?.ign ?? email,
+          peak_mmr: p?.peak_mmr ?? 0,
+          position: p?.position ?? null,
+          starting_lr: p?.starting_lr ?? 0,
+          lr: p?.lr ?? 0,
+          earned: e,
+        };
+      })
+      .sort((a, b) => b.earned - a.earned || (a.ign ?? "").localeCompare(b.ign ?? ""));
+
+    return NextResponse.json({ period: month, players: rows });
   } catch (e) {
     return errorResponse(e);
   }
