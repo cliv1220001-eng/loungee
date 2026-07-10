@@ -35,7 +35,8 @@
       "Bash(gh auth *)",
       "PowerShell(git remote -v; Write-Output \"--- gh ---\"; $g = Get-Command gh -ErrorAction SilentlyContinue; if \\($g\\) { $g.Source; gh auth status } else { \"gh not installed\" })",
       "Bash(git add *)",
-      "Bash(git commit -m 'Add LoungeE Rating \\(LR\\) system + up-front tournament gate *)"
+      "Bash(git commit -m 'Add LoungeE Rating \\(LR\\) system + up-front tournament gate *)",
+      "Bash(grep -iE '^\\(tsx|ts-node\\)\\(\\\\.cmd\\)?$')"
     ]
   }
 }

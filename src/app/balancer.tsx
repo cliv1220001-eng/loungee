@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { generateTeams, type BalanceMode, type BalanceResult } from "@/lib/balance";
+import type { BalanceMode, BalanceResult } from "@/lib/balance";
 import { startingLr } from "@/lib/lr";
 import { saveTeams, startBracketRun, usePersistentState } from "@/lib/store";
-import { ROLE_LABELS, type Player, type Role, type Team } from "@/lib/types";
+import { ROLE_LABELS, type Role, type Team } from "@/lib/types";
 
 interface DraftPlayer {
   id: string;
@@ -42,7 +42,7 @@ function registerPlayers(players: ReturnType<typeof registryFromTeams>): void {
 const ROLES: Role[] = [1, 2, 3, 4, 5];
 
 const MODES: { key: BalanceMode; label: string; hint: string }[] = [
-  { key: "mmr", label: "Balance MMR", hint: "Closest total MMR" },
+  { key: "mmr", label: "Balance LR", hint: "Closest total LR" },
   { key: "role", label: "Spread Roles", hint: "Even roles + MMR" },
   { key: "random", label: "Random", hint: "Shuffle without weighting" },
 ];
@@ -96,6 +96,9 @@ interface CurrentTournament {
 }
 const CURRENT_KEY = "dota-balancer:tournament";
 const NO_TOURNAMENT: CurrentTournament = { id: null, name: "" };
+
+// NOTE: team generation — including balancing and any team-shaping rules — runs
+// server-side in /api/teams so that logic never ships to the browser bundle.
 
 function parseRole(token: string | undefined): Role | null {
   if (!token) return null;
@@ -175,6 +178,7 @@ export default function Balancer() {
   const [revealed, setRevealed] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
+  const [genError, setGenError] = useState<string | null>(null);
 
   // Saved tournaments (Supabase-backed).
   const [current, setCurrent] = usePersistentState<CurrentTournament>(CURRENT_KEY, NO_TOURNAMENT);
@@ -324,9 +328,9 @@ export default function Balancer() {
     setResult(null);
   }
 
-  function generate() {
+  async function generate() {
     if (!canGenerate || shuffling) return;
-    const players: Player[] = ready.map((r) => ({
+    const players = ready.map((r) => ({
       id: r.id,
       name: r.name.trim(),
       mmr: Math.round(Number(r.mmr)),
@@ -334,14 +338,25 @@ export default function Balancer() {
       email: (r.email ?? "").trim().toLowerCase() || null,
     }));
 
-    // Brief loading beat so the shuffle is visibly "working".
     setShuffling(true);
     setRevealed(false); // keep the new teams hidden until the user reveals them
-    window.setTimeout(() => {
-      setResult(generateTeams(players, numTeams, mode));
+    setGenError(null);
+    try {
+      // Team generation runs on the server (/api/teams). The response is the exact
+      // Team shape the bracket + LR sync already consume — nothing else changes.
+      const res = await fetch("/api/teams", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ players, numTeams, mode }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error ?? "Could not generate teams.");
+      setResult(body as BalanceResult);
       setShuffleKey((k) => k + 1);
-      setShuffling(false);
-    }, 1000);
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : "Could not generate teams.");
+    }
+    setShuffling(false);
   }
 
   function sendToBracket() {
@@ -787,6 +802,12 @@ export default function Balancer() {
         >
           <span>{teamNote.text}</span>
         </div>
+
+        {genError && (
+          <div className="flex items-center gap-2 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-200">
+            <span>{genError}</span>
+          </div>
+        )}
       </div>
 
       {/* Teams ready but hidden — reveal on demand */}
@@ -807,10 +828,12 @@ export default function Balancer() {
         <section key={shuffleKey} className="flex flex-col gap-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-zinc-400">
-              MMR spread:{" "}
+              {mode === "mmr" ? "LR spread" : "MMR spread"}:{" "}
               <span className="font-bold text-[var(--lg-glow)]">{result.spread}</span>
               <span className="ml-2 text-zinc-600">·</span>
-              <span className="ml-2 capitalize text-zinc-500">{mode} mode</span>
+              <span className="ml-2 text-zinc-500">
+                {MODES.find((m) => m.key === mode)?.label ?? mode}
+              </span>
             </p>
             <button onClick={sendToBracket} className="btn-neon rounded-full px-6 py-2.5 text-sm">
               Send to Bracket →
