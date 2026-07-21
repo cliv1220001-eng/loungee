@@ -67,12 +67,20 @@ export async function GET(request: Request) {
       .lt("created_at", end);
     if (eErr) throw new Error(eErr.message);
 
-    const earned = new Map<string, number>();
-    for (const ev of events ?? []) earned.set(ev.email, (earned.get(ev.email) ?? 0) + ev.delta);
+    // Per player: net LR earned plus win/loss tallies. A positive delta is a win
+    // (+40, or +60 for the champion match); a negative delta is a loss.
+    const stats = new Map<string, { earned: number; wins: number; losses: number }>();
+    for (const ev of events ?? []) {
+      const s = stats.get(ev.email) ?? { earned: 0, wins: 0, losses: 0 };
+      s.earned += ev.delta;
+      if (ev.delta > 0) s.wins++;
+      else if (ev.delta < 0) s.losses++;
+      stats.set(ev.email, s);
+    }
 
     const byEmail = new Map((players ?? []).map((p) => [p.email, p]));
-    const rows = [...earned.entries()]
-      .map(([email, e]) => {
+    const rows = [...stats.entries()]
+      .map(([email, s]) => {
         const p = byEmail.get(email);
         return {
           email,
@@ -81,7 +89,9 @@ export async function GET(request: Request) {
           position: p?.position ?? null,
           starting_lr: p?.starting_lr ?? 0,
           lr: p?.lr ?? 0,
-          earned: e,
+          earned: s.earned,
+          wins: s.wins,
+          losses: s.losses,
         };
       })
       .sort((a, b) => b.earned - a.earned || (a.ign ?? "").localeCompare(b.ign ?? ""));

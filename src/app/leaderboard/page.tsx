@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { rankOf } from "@/lib/lr";
 import { ROLE_LABELS, type Role } from "@/lib/types";
 
@@ -13,6 +14,15 @@ interface LeaderboardPlayer {
   lr: number;
   /** Only present in monthly view: net LR earned that month. */
   earned?: number;
+  /** Only present in monthly view: wins/losses that month. */
+  wins?: number;
+  losses?: number;
+}
+
+/** Win rate as a whole-number percent, or null when no games were played. */
+function winRate(wins: number, losses: number): number | null {
+  const games = wins + losses;
+  return games === 0 ? null : Math.round((wins / games) * 100);
 }
 
 const RANK_ACCENTS: Record<string, string> = {
@@ -139,6 +149,8 @@ export default function LeaderboardPage() {
                 <th className="px-4 py-3 font-semibold">Rank</th>
                 <th className="px-2 py-3 text-center font-semibold">Pos</th>
                 <th className="px-4 py-3 text-right font-semibold">MMR</th>
+                {monthly && <th className="px-4 py-3 text-center font-semibold">W–L</th>}
+                {monthly && <th className="px-4 py-3 text-right font-semibold">Win %</th>}
                 {monthly && <th className="px-4 py-3 text-right font-semibold">LR earned</th>}
                 <th className="px-4 py-3 text-right font-semibold">LR</th>
               </tr>
@@ -149,13 +161,23 @@ export default function LeaderboardPage() {
                 const accent = RANK_ACCENTS[rank] ?? "#6a6a72";
                 const delta = p.lr - p.starting_lr;
                 const earned = p.earned ?? 0;
+                const wins = p.wins ?? 0;
+                const losses = p.losses ?? 0;
+                const rate = winRate(wins, losses);
                 return (
                   <tr
                     key={p.email}
                     className="border-b border-[var(--panel-border)] last:border-0 transition-colors hover:bg-white/[0.02]"
                   >
                     <td className="px-4 py-3 tabular-nums text-zinc-500">{i + 1}</td>
-                    <td className="px-4 py-3 font-semibold text-zinc-100">{p.ign || "—"}</td>
+                    <td className="px-4 py-3 font-semibold text-zinc-100">
+                      <Link
+                        href={`/leaderboard/${encodeURIComponent(p.email)}`}
+                        className="transition-colors hover:text-[var(--lg-glow)] hover:underline"
+                      >
+                        {p.ign || "—"}
+                      </Link>
+                    </td>
                     <td className="px-4 py-3">
                       <span
                         className="rounded-full px-2 py-0.5 text-xs font-semibold"
@@ -170,6 +192,18 @@ export default function LeaderboardPage() {
                         : "—"}
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums text-zinc-400">{p.peak_mmr}</td>
+                    {monthly && (
+                      <td className="px-4 py-3 text-center tabular-nums">
+                        <span className="text-emerald-400">{wins}</span>
+                        <span className="text-zinc-600">–</span>
+                        <span className="text-red-400">{losses}</span>
+                      </td>
+                    )}
+                    {monthly && (
+                      <td className="px-4 py-3 text-right tabular-nums text-zinc-300">
+                        {rate === null ? "—" : `${rate}%`}
+                      </td>
+                    )}
                     {monthly && (
                       <td
                         className={`px-4 py-3 text-right font-bold tabular-nums ${

@@ -36,7 +36,19 @@
       "PowerShell(git remote -v; Write-Output \"--- gh ---\"; $g = Get-Command gh -ErrorAction SilentlyContinue; if \\($g\\) { $g.Source; gh auth status } else { \"gh not installed\" })",
       "Bash(git add *)",
       "Bash(git commit -m 'Add LoungeE Rating \\(LR\\) system + up-front tournament gate *)",
-      "Bash(grep -iE '^\\(tsx|ts-node\\)\\(\\\\.cmd\\)?$')"
+      "Bash(grep -iE '^\\(tsx|ts-node\\)\\(\\\\.cmd\\)?$')",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(python -c \"import sys,json; s=json.load\\(sys.stdin\\).get\\('scripts',{}\\); print\\('\\\\n'.join\\(f'{k}: {v}' for k,v in s.items\\(\\)\\)\\)\")",
+      "Bash(node -e \"const s=require\\('c:/Users/test/dota-balancer/package.json'\\).scripts; for\\(const k in s\\) console.log\\(k+': '+s[k]\\)\")",
+      "Bash(node -e ' *)",
+      "Bash(rm -f /tmp/next-dev.log)",
+      "Bash(PORT=3111 npx next dev -p 3111)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" \"http://localhost:3000/api/players?month=2026-07\")",
+      "Bash(curl -s \"http://localhost:3000/api/players?month=2026-07\")",
+      "Bash(grep -iE \"^\\(tsx|ts-node|esbuild\\)$\")",
+      "Bash(JAR=\"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/cookies.txt\" node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-balance.mjs\")",
+      "Bash(JAR=\"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/cookies.txt\" node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-variety.mjs\")"
     ]
   }
 }

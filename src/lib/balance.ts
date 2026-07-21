@@ -254,11 +254,22 @@ function place(team: WorkingTeam, player: Player): void {
   team.totalMmr += player.mmr;
 }
 
-/** Teams with room, neediest first (most missing lanes), then lowest running MMR. */
+/**
+ * Teams with room, neediest first (most missing lanes), then lowest running MMR.
+ * Ties on BOTH keys are broken randomly so repeated builds explore different
+ * assignments (the caller runs several restarts and keeps the best).
+ */
 function neediestTeams(teams: WorkingTeam[]): WorkingTeam[] {
   return teams
     .filter((t) => t.players.length < t.capacity)
-    .sort((a, b) => missingCoreRoles(b) - missingCoreRoles(a) || a.totalMmr - b.totalMmr);
+    .map((t) => ({ t, r: Math.random() }))
+    .sort(
+      (a, b) =>
+        missingCoreRoles(b.t) - missingCoreRoles(a.t) ||
+        a.t.totalMmr - b.t.totalMmr ||
+        a.r - b.r
+    )
+    .map((x) => x.t);
 }
 
 /**
@@ -273,7 +284,38 @@ function neediestTeams(teams: WorkingTeam[]): WorkingTeam[] {
  * proper. A final pass swaps same-role players to tighten MMR without disturbing
  * the role layout.
  */
-export function balanceByRole(players: Player[], numTeams: number): BalanceResult {
+export function balanceByRole(players: Player[], numTeams: number, restarts = 80): BalanceResult {
+  if (numTeams < 1) throw new Error("numTeams must be at least 1");
+  if (players.length === 0) {
+    return {
+      teams: teamCapacities(0, numTeams).map((_, i) => ({ id: i + 1, players: [], totalMmr: 0 })),
+      spread: 0,
+    };
+  }
+
+  // Randomized restarts: each build varies via random tie-breaks (see
+  // neediestTeams). Keep the layout with the fewest missing lanes overall
+  // (role-completeness is this mode's whole point), breaking ties by tightest
+  // spread — never trading proper roles for a marginally closer total.
+  let best: WorkingTeam[] | null = null;
+  let bestMissing = Infinity;
+  let bestSpread = Infinity;
+  for (let r = 0; r < restarts; r++) {
+    const teams = buildRoleTeams(players, numTeams);
+    refineSameRole(teams);
+    const missing = teams.reduce((n, t) => n + missingCoreRoles(t), 0);
+    const spread = spreadOf(teams);
+    if (missing < bestMissing || (missing === bestMissing && spread < bestSpread)) {
+      best = teams;
+      bestMissing = missing;
+      bestSpread = spread;
+    }
+  }
+  return toResult(best!);
+}
+
+/** One randomized role-first build (no refine). See balanceByRole for the strategy. */
+function buildRoleTeams(players: Player[], numTeams: number): WorkingTeam[] {
   const capacities = teamCapacities(players.length, numTeams);
   const teams: WorkingTeam[] = capacities.map((capacity, i) => ({
     id: i + 1,
@@ -324,8 +366,7 @@ export function balanceByRole(players: Player[], numTeams: number): BalanceResul
     place(team, filled);
   }
 
-  refineSameRole(teams);
-  return toResult(teams);
+  return teams;
 }
 
 /** Like refine(), but only swaps players sharing the same role, preserving spread of roles. */
