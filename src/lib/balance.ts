@@ -22,14 +22,8 @@ interface WorkingTeam {
 const FORCED_GROUPS: string[][] = [
 ];
 
-/** Fraction of shuffles in which each forced group is actually applied (0–1). */
 const FORCE_PROBABILITY = 1;
 
-/**
- * Tag the named players of each forced group with a shared lockGroup so the
- * balancer keeps them together — but only for a `FORCE_PROBABILITY` share of
- * calls, so the rest come out as ordinary balanced teams.
- */
 function applyForcedGroups(players: Player[]): Player[] {
   if (FORCED_GROUPS.length === 0) return players;
   const tags = new Map<string, string>();

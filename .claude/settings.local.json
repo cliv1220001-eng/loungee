@@ -48,7 +48,8 @@
       "Bash(curl -s \"http://localhost:3000/api/players?month=2026-07\")",
       "Bash(grep -iE \"^\\(tsx|ts-node|esbuild\\)$\")",
       "Bash(JAR=\"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/cookies.txt\" node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-balance.mjs\")",
-      "Bash(JAR=\"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/cookies.txt\" node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-variety.mjs\")"
+      "Bash(JAR=\"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/cookies.txt\" node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-variety.mjs\")",
+      "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-drop.mjs\")"
     ]
   }
 }

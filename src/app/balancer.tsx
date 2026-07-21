@@ -83,10 +83,12 @@ interface BalancerSession {
   rows: DraftPlayer[];
   mode: BalanceMode;
   result: BalanceResult | null;
+  /** The untouched generated teams, kept so manual edits can be reverted. */
+  generated?: BalanceResult | null;
 }
 
 const SESSION_KEY = "dota-balancer:session";
-const DEFAULT_SESSION: BalancerSession = { rows: blankRows(10), mode: "mmr", result: null };
+const DEFAULT_SESSION: BalancerSession = { rows: blankRows(10), mode: "mmr", result: null, generated: null };
 
 // The tournament currently being worked on. Its roster/teams auto-save under this
 // name so it can be reloaded from history later.
@@ -167,6 +169,7 @@ export default function Balancer() {
   // Persisted across reloads (roster, chosen mode, last result).
   const [session, setSession] = usePersistentState<BalancerSession>(SESSION_KEY, DEFAULT_SESSION);
   const { rows, mode, result } = session;
+  const generated = session.generated ?? null;
   const setRows = (updater: DraftPlayer[] | ((prev: DraftPlayer[]) => DraftPlayer[])) =>
     setSession((s) => ({ ...s, rows: typeof updater === "function" ? updater(s.rows) : updater }));
   const setMode = (next: BalanceMode) => setSession((s) => ({ ...s, mode: next }));
@@ -207,6 +210,89 @@ export default function Balancer() {
       return key && lrByEmail.has(key) ? lrByEmail.get(key)! : startingLr(mmr);
     },
     [lrByEmail]
+  );
+
+  // --- Manual roster edits (drag & drop) ------------------------------------
+  // The player currently being dragged, identified by team + player id.
+  const [dragging, setDragging] = useState<{ teamId: number; playerId: string } | null>(null);
+  const [dragOver, setDragOver] = useState<{ teamId: number; playerId: string | null } | null>(null);
+
+  /** Total LR of a team (what the cards display and what balancing targets). */
+  const teamLr = useCallback(
+    (t: Team) => t.players.reduce((s, p) => s + lrOf(p.mmr, p.email), 0),
+    [lrOf]
+  );
+
+  /** Widest gap in team LR — the same measure the balancer minimizes. */
+  const lrSpread = useCallback(
+    (teams: Team[]) => {
+      if (teams.length === 0) return 0;
+      const totals = teams.map(teamLr);
+      return Math.max(...totals) - Math.min(...totals);
+    },
+    [teamLr]
+  );
+
+  /**
+   * Apply a manual drag: move `src` onto `dst`. Dropping onto another player
+   * SWAPS them (keeping both teams at their current size, so 5v5 stays intact);
+   * dropping onto a team's empty space moves the player only if that team has
+   * fewer players than the source team, which can only happen with uneven teams.
+   */
+  function applyDrop(
+    src: { teamId: number; playerId: string },
+    dst: { teamId: number; playerId: string | null }
+  ) {
+    if (!result) return;
+    if (src.teamId === dst.teamId && (dst.playerId === null || dst.playerId === src.playerId)) return;
+
+    const teams = result.teams.map((t) => ({ ...t, players: [...t.players] }));
+    const from = teams.find((t) => t.id === src.teamId);
+    const to = teams.find((t) => t.id === dst.teamId);
+    if (!from || !to) return;
+
+    const si = from.players.findIndex((p) => p.id === src.playerId);
+    if (si === -1) return;
+    const moved = from.players[si];
+
+    if (dst.playerId) {
+      // Swap with the dropped-on player.
+      const di = to.players.findIndex((p) => p.id === dst.playerId);
+      if (di === -1) return;
+      const target = to.players[di];
+      from.players[si] = target;
+      to.players[di] = moved;
+    } else {
+      // Move into open space — only when it won't unbalance team sizes.
+      if (to.players.length >= from.players.length) return;
+      from.players.splice(si, 1);
+      to.players.push(moved);
+    }
+
+    // Keep totalMmr truthful (it is a real-MMR sum; LR is derived via lrOf).
+    for (const t of teams) t.totalMmr = t.players.reduce((s, p) => s + p.mmr, 0);
+    setResult({ ...result, teams, spread: lrSpread(teams) });
+  }
+
+  /** Throw away manual edits and restore the teams exactly as generated. */
+  function revertTeams() {
+    if (generated) setResult(generated);
+  }
+
+  // True once the roster differs from what was generated.
+  const edited = useMemo(() => {
+    if (!result || !generated) return false;
+    const sig = (r: BalanceResult) =>
+      r.teams.map((t) => `${t.id}:${t.players.map((p) => p.id).sort().join(",")}`).join("|");
+    return sig(result) !== sig(generated);
+  }, [result, generated]);
+
+  // Spread of the teams on screen vs. the generated baseline, both measured in
+  // LR so the number matches the per-team LR the cards show.
+  const liveSpread = useMemo(() => (result ? lrSpread(result.teams) : 0), [result, lrSpread]);
+  const baseSpread = useMemo(
+    () => (generated ? lrSpread(generated.teams) : 0),
+    [generated, lrSpread]
   );
 
   // Load the saved tournament list + current LR on mount.
@@ -351,7 +437,9 @@ export default function Balancer() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? "Could not generate teams.");
-      setResult(body as BalanceResult);
+      // Keep a pristine copy alongside the working one so manual edits can be reverted.
+      const fresh = body as BalanceResult;
+      setSession((s) => ({ ...s, result: fresh, generated: fresh }));
       setShuffleKey((k) => k + 1);
     } catch (e) {
       setGenError(e instanceof Error ? e.message : "Could not generate teams.");
@@ -827,18 +915,59 @@ export default function Balancer() {
       {result && revealed && (
         <section key={shuffleKey} className="flex flex-col gap-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-zinc-400">
-              {mode === "mmr" ? "LR spread" : "MMR spread"}:{" "}
-              <span className="font-bold text-[var(--lg-glow)]">{result.spread}</span>
-              <span className="ml-2 text-zinc-600">·</span>
-              <span className="ml-2 text-zinc-500">
+            <p className="flex flex-wrap items-center gap-x-2 text-sm text-zinc-400">
+              <span>
+                LR spread:{" "}
+                <span
+                  className={`font-bold ${
+                    !edited
+                      ? "text-[var(--lg-glow)]"
+                      : liveSpread < baseSpread
+                        ? "text-emerald-400"
+                        : liveSpread > baseSpread
+                          ? "text-red-400"
+                          : "text-[var(--lg-glow)]"
+                  }`}
+                >
+                  {liveSpread}
+                </span>
+              </span>
+              {edited && liveSpread !== baseSpread && (
+                <span
+                  className={liveSpread < baseSpread ? "text-emerald-400" : "text-red-400"}
+                  title={`Generated spread was ${baseSpread}`}
+                >
+                  ({liveSpread < baseSpread ? "−" : "+"}
+                  {Math.abs(liveSpread - baseSpread)} vs generated)
+                </span>
+              )}
+              <span className="text-zinc-600">·</span>
+              <span className="text-zinc-500">
                 {MODES.find((m) => m.key === mode)?.label ?? mode}
               </span>
+              {edited && (
+                <span className="rounded-full bg-amber-400/10 px-2 py-0.5 text-xs font-semibold text-amber-300">
+                  edited
+                </span>
+              )}
             </p>
-            <button onClick={sendToBracket} className="btn-neon rounded-full px-6 py-2.5 text-sm">
-              Send to Bracket →
-            </button>
+            <div className="flex items-center gap-2">
+              {edited && (
+                <button
+                  onClick={revertTeams}
+                  className="rounded-full border border-[var(--panel-border)] px-4 py-2.5 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+                >
+                  Revert to generated
+                </button>
+              )}
+              <button onClick={sendToBracket} className="btn-neon rounded-full px-6 py-2.5 text-sm">
+                Send to Bracket →
+              </button>
+            </div>
           </div>
+          <p className="-mt-2 text-xs text-zinc-500">
+            Drag a player onto another player to swap them. Team LR updates as you go.
+          </p>
 
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {result.teams.map((team, i) => {
@@ -846,7 +975,21 @@ export default function Balancer() {
               return (
                 <div
                   key={team.id}
-                  className="panel animate-pop rounded-xl p-3.5"
+                  onDragOver={(e) => {
+                    e.preventDefault(); // allow dropping into the team's open space
+                    setDragOver({ teamId: team.id, playerId: null });
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (dragging) applyDrop(dragging, { teamId: team.id, playerId: null });
+                    setDragging(null);
+                    setDragOver(null);
+                  }}
+                  className={`panel animate-pop rounded-xl p-3.5 transition-shadow ${
+                    dragOver?.teamId === team.id && dragging && dragging.teamId !== team.id
+                      ? "ring-1 ring-[var(--accent)]"
+                      : ""
+                  }`}
                   style={{
                     animationDelay: `${i * 60}ms`,
                     borderColor: accent,
@@ -860,31 +1003,60 @@ export default function Balancer() {
                       title={`${team.totalMmr} MMR`}
                       className="text-[11px] font-bold tabular-nums text-zinc-200"
                     >
-                      {team.players.reduce((s, p) => s + lrOf(p.mmr, p.email), 0)} LR
+                      {teamLr(team)} LR
                     </span>
                   </div>
                   <ul className="flex flex-col gap-1.5">
-                    {team.players.map((p) => (
-                      <li key={p.id} className="flex items-center justify-between gap-2 text-[13px]">
-                        <span className="flex items-center gap-1.5 truncate">
-                          {p.role && (
-                            <span
-                              title={`${p.role}. ${ROLE_LABELS[p.role]}`}
-                              className="shrink-0 rounded bg-white/10 px-1 text-[10px] font-bold tabular-nums text-zinc-300"
-                            >
-                              {p.role}
-                            </span>
-                          )}
-                          <span className="truncate font-medium">{p.name}</span>
-                        </span>
-                        <span
-                          title={`${p.mmr} MMR`}
-                          className="shrink-0 tabular-nums text-zinc-400"
+                    {team.players.map((p) => {
+                      const isDragging = dragging?.playerId === p.id;
+                      const isTarget =
+                        dragOver?.playerId === p.id && dragging && dragging.playerId !== p.id;
+                      return (
+                        <li
+                          key={p.id}
+                          draggable
+                          onDragStart={() => setDragging({ teamId: team.id, playerId: p.id })}
+                          onDragEnd={() => {
+                            setDragging(null);
+                            setDragOver(null);
+                          }}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation(); // target this player, not the team
+                            setDragOver({ teamId: team.id, playerId: p.id });
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (dragging) applyDrop(dragging, { teamId: team.id, playerId: p.id });
+                            setDragging(null);
+                            setDragOver(null);
+                          }}
+                          title="Drag onto another player to swap"
+                          className={`flex cursor-grab items-center justify-between gap-2 rounded-md px-1 py-0.5 text-[13px] transition-colors active:cursor-grabbing ${
+                            isDragging ? "opacity-40" : ""
+                          } ${isTarget ? "bg-[var(--accent)]/20 ring-1 ring-[var(--accent)]" : "hover:bg-white/5"}`}
                         >
-                          {lrOf(p.mmr, p.email)} LR
-                        </span>
-                      </li>
-                    ))}
+                          <span className="flex items-center gap-1.5 truncate">
+                            {p.role && (
+                              <span
+                                title={`${p.role}. ${ROLE_LABELS[p.role]}`}
+                                className="shrink-0 rounded bg-white/10 px-1 text-[10px] font-bold tabular-nums text-zinc-300"
+                              >
+                                {p.role}
+                              </span>
+                            )}
+                            <span className="truncate font-medium">{p.name}</span>
+                          </span>
+                          <span
+                            title={`${p.mmr} MMR`}
+                            className="shrink-0 tabular-nums text-zinc-400"
+                          >
+                            {lrOf(p.mmr, p.email)} LR
+                          </span>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               );
