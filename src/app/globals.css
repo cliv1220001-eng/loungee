@@ -111,6 +111,109 @@ body {
   color: var(--foreground);
 }
 
+/* --- Captain's Draft reveal --------------------------------------------- */
+
+/* The picked name lands big, holds, then shrinks away toward the team cards. */
+@keyframes reveal-name {
+  0% {
+    opacity: 0;
+    transform: scale(0.3) rotate(-4deg);
+  }
+  12% {
+    opacity: 1;
+    transform: scale(1.15) rotate(1deg);
+  }
+  20% {
+    transform: scale(1) rotate(0deg);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.25) translateY(38vh);
+  }
+}
+
+/* Card flip as the face-down pick turns over. */
+@keyframes reveal-flip {
+  0% {
+    transform: rotateY(0deg);
+  }
+  100% {
+    transform: rotateY(180deg);
+  }
+}
+
+/* Each confetti piece gets its own fall distance/spin via inline custom props.
+   Pieces burst from the middle of the screen outward and fall, so they are
+   visible immediately rather than starting off-screen above the viewport. */
+@keyframes confetti-fall {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.4) rotate(0deg);
+  }
+  8% {
+    opacity: 1;
+    transform: translate3d(calc(var(--dx, 0) * 0.25), -12vh, 0) scale(1) rotate(90deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--dx, 0), var(--dy, 80vh), 0) scale(0.9)
+      rotate(var(--spin, 720deg));
+  }
+}
+
+/* Backdrop fades in fast and out with the name, so the reveal owns the screen
+   for its moment instead of overlapping the draft board. */
+@keyframes reveal-backdrop {
+  0% {
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.animate-reveal-name {
+  animation: reveal-name 2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-reveal-backdrop {
+  animation: reveal-backdrop 2s ease-out both;
+}
+
+.confetti-piece {
+  position: absolute;
+  /* Burst origin: just above centre, where the revealed name lands. */
+  top: 38vh;
+  width: 9px;
+  height: 14px;
+  border-radius: 2px;
+  will-change: transform, opacity;
+  animation: confetti-fall var(--dur, 2.4s) cubic-bezier(0.15, 0.6, 0.5, 1) both;
+  animation-delay: var(--delay, 0s);
+}
+
+/* Respect users who prefer less motion: keep the reveal, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-reveal-name,
+  .animate-reveal-backdrop {
+    animation: none;
+    opacity: 1;
+  }
+  .confetti-piece {
+    display: none;
+  }
+}
+
 /* Bracket canvas scrollbar */
 .bracket-scroll::-webkit-scrollbar {
   height: 10px;

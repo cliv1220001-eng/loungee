@@ -80,7 +80,7 @@ export default function LeaderboardPage() {
   const subtitle = useMemo(
     () =>
       monthly
-        ? `LR earned in ${monthLabel(month)} — +40 per win, −40 per loss, +60 for the champion.`
+        ? `LR earned in ${monthLabel(month)}`
         : "Every registered player, ranked by all-time LR.",
     [monthly, month]
   );

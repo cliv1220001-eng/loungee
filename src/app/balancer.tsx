@@ -3,6 +3,16 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import type { BalanceBasis, BalanceMode, BalanceResult } from "@/lib/balance";
+import {
+  OFFER_SIZE,
+  isComplete as draftComplete,
+  pick as draftPick,
+  startDraft,
+  toTeams as draftToTeams,
+  undo as draftUndo,
+  type DraftState,
+} from "@/lib/draft";
+import DraftReveal from "./draft-reveal";
 import { startingLr } from "@/lib/lr";
 import { saveTeams, startBracketRun, usePersistentState } from "@/lib/store";
 import { ROLE_LABELS, type Role, type Team } from "@/lib/types";
@@ -42,10 +52,15 @@ function registerPlayers(players: ReturnType<typeof registryFromTeams>): void {
 const ROLES: Role[] = [1, 2, 3, 4, 5];
 
 // Strategies. What they weight by (LR or MMR) is chosen separately — see BASES.
-const MODES: { key: BalanceMode; label: string; hint: string }[] = [
+// "draft" is not a server balancing mode: it runs entirely client-side as an
+// interactive draft (see @/lib/draft) and produces teams the same shape.
+type PageMode = BalanceMode | "draft";
+
+const MODES: { key: PageMode; label: string; hint: string }[] = [
   { key: "mmr", label: "Balance", hint: "Closest team totals" },
   { key: "role", label: "Spread Roles", hint: "Even roles + balanced" },
   { key: "random", label: "Random", hint: "Shuffle without weighting" },
+  { key: "draft", label: "Captain's Draft", hint: "Captains pick blind" },
 ];
 
 /** The measure of strength the balancer weights by (ignored by Random). */
@@ -88,7 +103,7 @@ function blankRows(n: number): DraftPlayer[] {
 
 interface BalancerSession {
   rows: DraftPlayer[];
-  mode: BalanceMode;
+  mode: PageMode;
   /** Weight teams by current LR (default) or raw peak MMR. */
   basis?: BalanceBasis;
   result: BalanceResult | null;
@@ -188,9 +203,13 @@ export default function Balancer() {
   const [session, setSession] = usePersistentState<BalancerSession>(SESSION_KEY, DEFAULT_SESSION);
   const { rows, mode, result } = session;
   const generated = session.generated ?? null;
+  const basis: BalanceBasis = session.basis ?? "lr";
+  // Sessions saved before the basis toggle existed were all LR-based.
+  const resultBasis: BalanceBasis = session.resultBasis ?? "lr";
   const setRows = (updater: DraftPlayer[] | ((prev: DraftPlayer[]) => DraftPlayer[])) =>
     setSession((s) => ({ ...s, rows: typeof updater === "function" ? updater(s.rows) : updater }));
-  const setMode = (next: BalanceMode) => setSession((s) => ({ ...s, mode: next }));
+  const setMode = (next: PageMode) => setSession((s) => ({ ...s, mode: next }));
+  const setBasis = (next: BalanceBasis) => setSession((s) => ({ ...s, basis: next }));
   const setResult = (next: BalanceResult | null) => setSession((s) => ({ ...s, result: next }));
 
   // Transient UI state (not persisted).
@@ -200,11 +219,17 @@ export default function Balancer() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [genError, setGenError] = useState<string | null>(null);
+  /** Free-text roster filter — matches player name (blank shows everyone). */
+  const [search, setSearch] = useState("");
+  /** Guard so a stray click can't wipe a large roster. */
+  const [confirmReset, setConfirmReset] = useState(false);
 
   // Saved tournaments (Supabase-backed).
   const [current, setCurrent] = usePersistentState<CurrentTournament>(CURRENT_KEY, NO_TOURNAMENT);
   const [newName, setNewName] = useState("");
   const [savedList, setSavedList] = useState<{ id: string; name: string; created_at: string }[] | null>(null);
+  /** Tournament id awaiting delete confirmation (guards an irreversible action). */
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [tourneyBusy, setTourneyBusy] = useState(false);
   const [tourneyMsg, setTourneyMsg] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -234,14 +259,24 @@ export default function Balancer() {
   // The player currently being dragged, identified by team + player id.
   const [dragging, setDragging] = useState<{ teamId: number; playerId: string } | null>(null);
   const [dragOver, setDragOver] = useState<{ teamId: number; playerId: string | null } | null>(null);
+  /** Click-to-swap selection — the touch-friendly path (HTML5 drag has no
+   *  touch support, so tapping one player then another swaps them). */
+  const [picked, setPicked] = useState<{ teamId: number; playerId: string } | null>(null);
 
-  /** Total LR of a team (what the cards display and what balancing targets). */
-  const teamLr = useCallback(
-    (t: Team) => t.players.reduce((s, p) => s + lrOf(p.mmr, p.email), 0),
-    [lrOf]
+  /** One player's weight under the basis the current teams were built with. */
+  const weightOf = useCallback(
+    (p: { mmr: number; email?: string | null }) =>
+      resultBasis === "mmr" ? p.mmr : lrOf(p.mmr, p.email),
+    [resultBasis, lrOf]
   );
 
-  /** Widest gap in team LR — the same measure the balancer minimizes. */
+  /** Team total in the active basis — what the cards show and balancing targets. */
+  const teamLr = useCallback(
+    (t: Team) => t.players.reduce((s, p) => s + weightOf(p), 0),
+    [weightOf]
+  );
+
+  /** Widest gap between team totals — the measure the balancer minimizes. */
   const lrSpread = useCallback(
     (teams: Team[]) => {
       if (teams.length === 0) return 0;
@@ -250,6 +285,9 @@ export default function Balancer() {
     },
     [teamLr]
   );
+
+  /** Unit label for the active basis, used across the results UI. */
+  const unit = resultBasis === "mmr" ? "MMR" : "LR";
 
   /**
    * Apply a manual drag: move `src` onto `dst`. Dropping onto another player
@@ -292,10 +330,47 @@ export default function Balancer() {
     setResult({ ...result, teams, spread: lrSpread(teams) });
   }
 
+  /**
+   * Tap/click a player to select, tap another to swap them. Works on touch,
+   * where HTML5 drag-and-drop does nothing. Tapping the same player deselects.
+   */
+  function pickPlayer(teamId: number, playerId: string) {
+    if (!picked) {
+      setPicked({ teamId, playerId });
+      return;
+    }
+    if (picked.playerId === playerId) {
+      setPicked(null); // tapped the same one again — cancel
+      return;
+    }
+    applyDrop(picked, { teamId, playerId });
+    setPicked(null);
+  }
+
   /** Throw away manual edits and restore the teams exactly as generated. */
   function revertTeams() {
     if (generated) setResult(generated);
+    setPicked(null);
   }
+
+  // --- Captain's Draft -------------------------------------------------------
+  // Runs entirely in the browser: no server round-trip, so the organizer can
+  // undo freely. Cards stay face-down (role + rating only) until picked.
+  // NOTE: the handlers live further down, after `ready` / `numTeams` are derived.
+  const [draft, setDraft] = useState<DraftState | null>(null);
+  /**
+   * The pick currently being celebrated. Held separately from the draft state
+   * because the player leaves the offer the instant they're picked, and the
+   * overlay needs their details for the full reveal animation.
+   */
+  const [reveal, setReveal] = useState<{
+    key: number;
+    name: string;
+    role: Role | null;
+    rating: number;
+    teamId: number;
+    accent: string;
+  } | null>(null);
 
   // True once the roster differs from what was generated.
   const edited = useMemo(() => {
@@ -364,12 +439,98 @@ export default function Balancer() {
     });
   }, [rows]);
 
+  // Roster health — surfaces the rows that would be silently dropped by `ready`
+  // (a blank name or MMR excludes a row) plus duplicates, so a 100+ player paste
+  // can be checked at a glance instead of by scrolling every tier column.
+  const rosterIssues = useMemo(() => {
+    const filled = rows.filter((r) => r.name.trim() !== "" || r.mmr.trim() !== "");
+    const missingMmr = filled.filter((r) => r.name.trim() !== "" && r.mmr.trim() === "");
+    const missingName = filled.filter((r) => r.name.trim() === "" && r.mmr.trim() !== "");
+    const noEmail = filled.filter((r) => (r.email ?? "").trim() === "" && r.name.trim() !== "");
+    const seen = new Set<string>();
+    const dupes: DraftPlayer[] = [];
+    for (const r of filled) {
+      const k = (r.email ?? "").trim().toLowerCase() || r.name.trim().toLowerCase();
+      if (!k) continue;
+      if (seen.has(k)) dupes.push(r);
+      seen.add(k);
+    }
+    return { filled: filled.length, missingMmr, missingName, noEmail, dupes };
+  }, [rows]);
+
+  /** Rows matching the search box (name match, case-insensitive). */
+  const matchesSearch = useCallback(
+    (r: DraftPlayer) => {
+      const q = search.trim().toLowerCase();
+      return q === "" || r.name.toLowerCase().includes(q);
+    },
+    [search]
+  );
+
   // Dota teams are 5 players each — the team count follows the player count.
   const TEAM_SIZE = 5;
   const playerCount = ready.length;
   const numTeams = Math.floor(playerCount / TEAM_SIZE);
   const remainder = playerCount % TEAM_SIZE;
   const canGenerate = numTeams >= 2;
+
+  // Captain's Draft handlers — defined here so they read the derived roster
+  // values (`ready`, `numTeams`, `canGenerate`) after those exist.
+
+  /** Begin a draft from the ready roster, ranking captains by the chosen basis. */
+  function beginDraft() {
+    if (!canGenerate) return;
+    const players = ready.map((r) => ({
+      id: r.id,
+      name: r.name.trim(),
+      mmr: Math.round(Number(r.mmr)),
+      role: r.role,
+      email: (r.email ?? "").trim().toLowerCase() || null,
+    }));
+    const weight = (p: { mmr: number; email?: string | null }) =>
+      basis === "mmr" ? p.mmr : lrOf(p.mmr, p.email);
+    setDraft(startDraft(players, numTeams, weight));
+    setSession((s) => ({ ...s, result: null, generated: null, resultBasis: basis }));
+    setRevealed(false);
+    setGenError(null);
+  }
+
+  /**
+   * Organizer clicks a face-down card on the captain's behalf. The card's
+   * identity is captured BEFORE applying the pick (it leaves the offer
+   * immediately) so the celebration overlay can show who it was.
+   */
+  function takePick(playerId: string) {
+    if (!draft) return;
+    const chosen = draft.offer.find((p) => p.id === playerId);
+    if (!chosen) return;
+    const teamIndex = draft.turn;
+    setReveal({
+      key: draft.history.length, // unique per pick → remounts the confetti
+      name: chosen.name,
+      role: chosen.role,
+      rating: weightOf(chosen),
+      teamId: draft.teams[teamIndex]?.id ?? 0,
+      accent: TEAM_ACCENTS[teamIndex % TEAM_ACCENTS.length],
+    });
+    setDraft(draftPick(draft, playerId));
+    // Matches the reveal-name animation duration in globals.css.
+    window.setTimeout(() => setReveal(null), 2000);
+  }
+
+  /** Push the finished draft into the normal result flow (bracket, LR, etc). */
+  function finishDraft() {
+    if (!draft) return;
+    const teams = draftToTeams(draft);
+    const totals = teams.map((t) => t.players.reduce((s, p) => s + weightOf(p), 0));
+    const res: BalanceResult = {
+      teams,
+      spread: totals.length ? Math.max(...totals) - Math.min(...totals) : 0,
+    };
+    setSession((s) => ({ ...s, result: res, generated: res, resultBasis: basis }));
+    setRevealed(true);
+    setDraft(null);
+  }
 
   const teamNote: { tone: "info" | "warn" | "ok"; text: string } = (() => {
     if (playerCount === 0) {
@@ -429,7 +590,9 @@ export default function Balancer() {
   }
   function reset() {
     setRows(blankRows(10));
-    setResult(null);
+    setSession((s) => ({ ...s, result: null, generated: null }));
+    setConfirmReset(false);
+    setSearch("");
   }
 
   async function generate() {
@@ -451,13 +614,21 @@ export default function Balancer() {
       const res = await fetch("/api/teams", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ players, numTeams, mode }),
+        // "draft" is client-side only and never reaches the balancer.
+        body: JSON.stringify({
+          players,
+          numTeams,
+          mode: mode === "draft" ? "mmr" : mode,
+          basis,
+        }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? "Could not generate teams.");
-      // Keep a pristine copy alongside the working one so manual edits can be reverted.
+      // Keep a pristine copy alongside the working one so manual edits can be
+      // reverted, and pin the basis these teams were built with so the totals on
+      // screen keep describing how they were actually balanced.
       const fresh = body as BalanceResult;
-      setSession((s) => ({ ...s, result: fresh, generated: fresh }));
+      setSession((s) => ({ ...s, result: fresh, generated: fresh, resultBasis: basis }));
       setShuffleKey((k) => k + 1);
     } catch (e) {
       setGenError(e instanceof Error ? e.message : "Could not generate teams.");
@@ -668,24 +839,35 @@ export default function Balancer() {
             <p className="text-sm text-zinc-500">No saved tournaments yet.</p>
           ) : (
             savedList.map((t) => (
-              <div key={t.id} className="flex items-center gap-2 text-sm">
+              <div
+                key={t.id}
+                className="group flex items-center gap-2 rounded-md text-sm transition-colors hover:bg-white/5"
+              >
                 <button
                   onClick={() => loadTournament(t.id, t.name)}
                   disabled={tourneyBusy}
-                  className="flex-1 truncate rounded-md px-2 py-2 text-left transition-colors hover:bg-white/5"
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-left"
                 >
-                  <span className="font-semibold">{t.name}</span>
-                  <span className="ml-2 text-xs text-zinc-500">
+                  <span className="truncate font-semibold">{t.name}</span>
+                  <span className="ml-auto shrink-0 text-xs text-zinc-500">
                     {new Date(t.created_at).toLocaleDateString()}
                   </span>
                 </button>
                 <button
-                  onClick={() => deleteTournament(t.id)}
+                  onClick={() => {
+                    if (confirmDelete === t.id) deleteTournament(t.id);
+                    else setConfirmDelete(t.id);
+                  }}
+                  onBlur={() => setConfirmDelete(null)}
                   disabled={tourneyBusy}
-                  aria-label="Delete tournament"
-                  className="rounded-md px-2 py-2 text-zinc-500 transition-colors hover:text-red-400"
+                  aria-label={confirmDelete === t.id ? "Confirm delete" : "Delete tournament"}
+                  className={`shrink-0 rounded-md px-2 py-2 text-xs font-semibold transition-colors ${
+                    confirmDelete === t.id
+                      ? "text-red-400"
+                      : "text-zinc-600 hover:text-red-400 group-hover:text-zinc-400"
+                  }`}
                 >
-                  ✕
+                  {confirmDelete === t.id ? "Sure?" : "✕"}
                 </button>
               </div>
             ))
@@ -714,7 +896,15 @@ export default function Balancer() {
           </span>
           <span className="truncate text-lg font-bold text-zinc-100">{current.name}</span>
         </div>
-        <span className="text-xs text-zinc-500">
+        <span
+          className={`flex items-center gap-1.5 text-xs ${
+            saveState === "error" ? "text-amber-300" : "text-zinc-500"
+          }`}
+        >
+          {saveState === "saving" && (
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-zinc-400" />
+          )}
+          {saveState === "saved" && <span className="text-emerald-400">✓</span>}
           {saveState === "saving"
             ? "Saving…"
             : saveState === "saved"
@@ -740,27 +930,75 @@ export default function Balancer() {
         </div>
       </div>
 
-      {/* Mode selector */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {MODES.map((m) => {
-          const active = mode === m.key;
-          return (
-            <button
-              key={m.key}
-              onClick={() => setMode(m.key)}
-              className={`panel flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-all ${
-                active
-                  ? "ring-1 ring-[var(--accent)]"
-                  : "opacity-70 hover:opacity-100"
-              }`}
-            >
-              <span className="flex flex-col">
-                <span className="font-semibold">{m.label}</span>
-                <span className="text-xs text-zinc-400">{m.hint}</span>
-              </span>
-            </button>
-          );
-        })}
+      {/* Strategy + basis. The mode decides HOW teams are built; the basis
+          decides WHAT strength is measured by. Random ignores the basis. */}
+      <div className="flex flex-col gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {MODES.map((m) => {
+            const active = mode === m.key;
+            return (
+              <button
+                key={m.key}
+                onClick={() => setMode(m.key)}
+                aria-pressed={active}
+                className={`panel flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-all ${
+                  active
+                    ? "ring-1 ring-[var(--accent)]"
+                    : "opacity-70 hover:opacity-100"
+                }`}
+              >
+                <span
+                  className={`h-2 w-2 shrink-0 rounded-full ${
+                    active ? "bg-[var(--accent)]" : "bg-zinc-600"
+                  }`}
+                />
+                <span className="flex flex-col">
+                  <span className="font-semibold">{m.label}</span>
+                  <span className="text-xs text-zinc-400">
+                    {m.key === "random"
+                      ? m.hint
+                      : m.key === "draft"
+                        ? `Top ${basis === "lr" ? "LR" : "MMR"} captains`
+                        : `${m.hint} · by ${basis === "lr" ? "LR" : "MMR"}`}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div
+          className={`flex flex-wrap items-center gap-3 transition-opacity ${
+            mode === "random" ? "opacity-40" : ""
+          }`}
+        >
+          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            Balance by
+          </span>
+          <div className="panel flex rounded-full p-1">
+            {BASES.map((b) => (
+              <button
+                key={b.key}
+                onClick={() => setBasis(b.key)}
+                disabled={mode === "random"}
+                title={b.hint}
+                aria-pressed={basis === b.key}
+                className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
+                  basis === b.key ? "btn-neon" : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-xs text-zinc-500">
+            {mode === "random"
+              ? "Random ignores skill entirely."
+              : mode === "draft"
+                ? `Captains are the top ${basis === "lr" ? "LR" : "MMR"} players; cards show ${basis === "lr" ? "LR" : "MMR"}.`
+                : BASES.find((b) => b.key === basis)?.hint}
+          </span>
+        </div>
       </div>
 
       {/* Player roster input — players auto-sort into MMR tier columns.
@@ -768,9 +1006,83 @@ export default function Balancer() {
           five tier columns stay wide enough to read player names. */}
       <section className="relative left-1/2 right-1/2 -ml-[50vw] -mr-[50vw] w-screen px-6">
         <div className="panel mx-auto flex max-w-[1800px] flex-col gap-4 rounded-2xl p-4">
+        {/* Roster toolbar: search + live health counts */}
+        <div className="flex flex-wrap items-center gap-3 border-b border-[var(--panel-border)] pb-3">
+          <div className="relative">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search players…"
+              className="field w-56 rounded-lg py-1.5 pl-8 pr-8 text-sm"
+            />
+            <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-zinc-500">
+              ⌕
+            </span>
+            {search !== "" && (
+              <button
+                onClick={() => setSearch("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-zinc-500 hover:text-white"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          <span className="text-sm text-zinc-400">
+            <span className="font-bold tabular-nums text-zinc-100">{playerCount}</span> ready
+            {rosterIssues.filled !== playerCount && (
+              <span className="text-zinc-500"> · {rosterIssues.filled} rows</span>
+            )}
+          </span>
+
+          {/* Only the problems that actually drop a player from the pool. */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {rosterIssues.missingMmr.length > 0 && (
+              <span className="rounded-full bg-amber-400/10 px-2 py-0.5 font-semibold text-amber-300">
+                {rosterIssues.missingMmr.length} missing MMR
+              </span>
+            )}
+            {rosterIssues.missingName.length > 0 && (
+              <span className="rounded-full bg-amber-400/10 px-2 py-0.5 font-semibold text-amber-300">
+                {rosterIssues.missingName.length} missing name
+              </span>
+            )}
+            {rosterIssues.dupes.length > 0 && (
+              <span className="rounded-full bg-red-400/10 px-2 py-0.5 font-semibold text-red-300">
+                {rosterIssues.dupes.length} duplicate
+              </span>
+            )}
+            {rosterIssues.noEmail.length > 0 && (
+              <span
+                title="Players without an email are not tracked on the LR leaderboard."
+                className="rounded-full bg-white/5 px-2 py-0.5 font-semibold text-zinc-400"
+              >
+                {rosterIssues.noEmail.length} no email
+              </span>
+            )}
+          </div>
+
+          <div className="ml-auto flex items-center gap-3">
+            <button
+              onClick={addRow}
+              className="text-sm font-semibold text-[var(--lg-glow)] transition-opacity hover:opacity-80"
+            >
+              + Add player
+            </button>
+            <button
+              onClick={() => setBulkOpen((o) => !o)}
+              className="text-sm font-semibold text-zinc-400 transition-opacity hover:opacity-80"
+            >
+              Bulk add
+            </button>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           {TIERS.map((t) => {
-            const tierRows = rows.filter((r) => tierOf(r.mmr) === t.n);
+            const tierAll = rows.filter((r) => tierOf(r.mmr) === t.n);
+            const tierRows = tierAll.filter(matchesSearch);
             return (
               <div
                 key={t.n}
@@ -782,14 +1094,18 @@ export default function Balancer() {
                       Tier {t.n}
                     </span>
                     <span className="ml-auto rounded-full bg-white/5 px-2 py-0.5 text-[11px] tabular-nums text-zinc-400">
-                      {tierRows.length}
+                      {search.trim() !== "" && tierRows.length !== tierAll.length
+                        ? `${tierRows.length}/${tierAll.length}`
+                        : tierAll.length}
                     </span>
                   </div>
                   <span className="text-[11px] text-zinc-500">{t.range} MMR</span>
                 </div>
                 <div className="flex max-h-[60vh] flex-col gap-2 overflow-y-auto pr-1">
                   {tierRows.length === 0 ? (
-                    <p className="px-1 py-3 text-center text-[11px] text-zinc-600">No players</p>
+                    <p className="px-1 py-3 text-center text-[11px] text-zinc-600">
+                      {search.trim() !== "" && tierAll.length > 0 ? "No match" : "No players"}
+                    </p>
                   ) : (
                     tierRows.map(renderCard)
                   )}
@@ -800,30 +1116,15 @@ export default function Balancer() {
         </div>
 
         {unrankedRows.length > 0 && (
-          <div className="flex flex-col gap-3 rounded-xl border border-dashed border-[var(--panel-border)] p-3">
-            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-              No MMR yet · {unrankedRows.length}
+          <div className="flex flex-col gap-3 rounded-xl border border-dashed border-amber-400/25 bg-amber-400/[0.03] p-3">
+            <span className="text-xs font-semibold uppercase tracking-wider text-amber-300/80">
+              No MMR yet · {unrankedRows.length} — these are excluded until an MMR is set
             </span>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-              {unrankedRows.map(renderCard)}
+              {unrankedRows.filter(matchesSearch).map(renderCard)}
             </div>
           </div>
         )}
-
-        <div className="flex flex-wrap items-center gap-4">
-          <button
-            onClick={addRow}
-            className="text-sm font-semibold text-[var(--lg-glow)] transition-opacity hover:opacity-80"
-          >
-            + Add player
-          </button>
-          <button
-            onClick={() => setBulkOpen((o) => !o)}
-            className="text-sm font-semibold text-zinc-400 transition-opacity hover:opacity-80"
-          >
-            Bulk add
-          </button>
-        </div>
 
         {bulkOpen && (
           <div className="animate-fade-up flex flex-col gap-2 rounded-xl border border-[var(--panel-border)] bg-white/[0.02] p-3">
@@ -876,22 +1177,61 @@ export default function Balancer() {
             </span>
           </div>
 
-          <div className="ml-auto flex gap-2">
+          <div className="ml-auto flex items-center gap-2">
+            {confirmReset ? (
+              <div className="flex items-center gap-2 rounded-full border border-red-400/30 bg-red-400/10 px-3 py-1.5">
+                <span className="text-xs text-red-200">
+                  Clear {playerCount} player{playerCount === 1 ? "" : "s"}?
+                </span>
+                <button
+                  onClick={reset}
+                  className="rounded-full bg-red-500/80 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-red-500"
+                >
+                  Yes, clear
+                </button>
+                <button
+                  onClick={() => setConfirmReset(false)}
+                  className="px-1 text-xs font-semibold text-zinc-300 hover:text-white"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => (rosterIssues.filled === 0 ? reset() : setConfirmReset(true))}
+                className="rounded-full border border-[var(--panel-border)] px-4 py-2.5 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+              >
+                Reset
+              </button>
+            )}
             <button
-              onClick={reset}
-              className="rounded-full border border-[var(--panel-border)] px-4 py-2.5 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
-            >
-              Reset
-            </button>
-            <button
-              onClick={generate}
+              onClick={mode === "draft" ? beginDraft : generate}
               disabled={!canGenerate || shuffling}
+              title={
+                canGenerate
+                  ? `${
+                      mode === "random"
+                        ? "Random"
+                        : mode === "draft"
+                          ? `Captain's Draft by ${basis === "lr" ? "LR" : "MMR"}`
+                          : `Balance by ${basis === "lr" ? "LR" : "MMR"}`
+                    } · ${numTeams} teams`
+                  : "Need at least 2 full teams"
+              }
               className="btn-neon flex items-center gap-2 rounded-full px-6 py-2.5 text-sm"
             >
               {shuffling && (
                 <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
               )}
-              {shuffling ? "Shuffling…" : result ? "Reshuffle" : "Generate Teams"}
+              {shuffling
+                ? "Shuffling…"
+                : mode === "draft"
+                  ? draft
+                    ? "Restart Draft"
+                    : "Start Draft"
+                  : result
+                    ? "Reshuffle"
+                    : "Generate Teams"}
             </button>
           </div>
         </div>
@@ -916,10 +1256,194 @@ export default function Balancer() {
         )}
       </div>
 
+      {/* Celebration overlay for the pick just revealed. Keyed by pick number so
+          every pick remounts it and replays the confetti from the start. */}
+      {reveal && (
+        <DraftReveal
+          key={reveal.key}
+          name={reveal.name}
+          role={reveal.role}
+          rating={reveal.rating}
+          unit={unit}
+          teamId={reveal.teamId}
+          accent={reveal.accent}
+        />
+      )}
+
+      {/* Captain's Draft board */}
+      {draft && (
+        <section className="flex flex-col gap-5">
+          {/* Status bar: who's on the clock, progress, controls */}
+          <div className="panel flex flex-wrap items-center gap-3 rounded-2xl p-4">
+            {draftComplete(draft) ? (
+              <div className="flex min-w-0 flex-col">
+                <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                  Draft complete
+                </span>
+                <span className="text-lg font-bold text-zinc-100">
+                  All {draft.teams.length} teams are full
+                </span>
+              </div>
+            ) : (
+              <div className="flex min-w-0 flex-col">
+                <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  On the clock · round {draft.history.length / draft.teams.length < 1
+                    ? 1
+                    : Math.floor(draft.history.length / draft.teams.length) + 1}
+                </span>
+                <span
+                  className="truncate text-lg font-bold"
+                  style={{ color: TEAM_ACCENTS[draft.turn % TEAM_ACCENTS.length] }}
+                >
+                  Team {draft.teams[draft.turn]?.id} — {draft.teams[draft.turn]?.captain.name}
+                </span>
+              </div>
+            )}
+
+            <span className="text-sm text-zinc-400">
+              <span className="font-bold tabular-nums text-zinc-100">{draft.history.length}</span>
+              {" / "}
+              <span className="tabular-nums">
+                {draft.teams.length * draft.teamSize - draft.teams.length}
+              </span>{" "}
+              picked
+              <span className="ml-2 text-zinc-600">·</span>
+              <span className="ml-2 text-zinc-500">{draft.pool.length} left</span>
+            </span>
+
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => setDraft(draftUndo(draft))}
+                disabled={draft.history.length === 0}
+                className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5 disabled:opacity-40"
+              >
+                Undo
+              </button>
+              <button
+                onClick={() => setDraft(null)}
+                className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+              >
+                Cancel
+              </button>
+              {draftComplete(draft) && (
+                <button onClick={finishDraft} className="btn-neon rounded-full px-6 py-2 text-sm">
+                  Use these teams →
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Face-down offer */}
+          {!draftComplete(draft) && (
+            <div className="flex flex-col gap-3">
+              <p className="text-sm text-zinc-400">
+                Pick one of {Math.min(OFFER_SIZE, draft.pool.length)} — names are hidden until
+                chosen. Showing role and {unit}.
+              </p>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                {draft.offer.map((p, i) => (
+                  <button
+                    key={p.id}
+                    onClick={() => takePick(p.id)}
+                    disabled={reveal !== null}
+                    className="panel animate-pop group flex flex-col items-center gap-2 rounded-xl p-4 text-center transition-all hover:-translate-y-0.5 hover:ring-1 hover:ring-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
+                    style={{ animationDelay: `${i * 50}ms` }}
+                  >
+                    <span className="text-3xl opacity-30 transition-opacity group-hover:opacity-60">
+                      ?
+                    </span>
+                    <span className="text-xl font-extrabold tabular-nums text-zinc-100">
+                      {weightOf(p)}
+                    </span>
+                    <span className="text-[11px] uppercase tracking-wider text-zinc-500">
+                      {unit}
+                    </span>
+                    <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] font-semibold text-zinc-300">
+                      {p.role ? ROLE_LABELS[p.role] : "Any role"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Live teams */}
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {draft.teams.map((t, i) => {
+              const accent = TEAM_ACCENTS[i % TEAM_ACCENTS.length];
+              const onClock = !draftComplete(draft) && draft.turn === i;
+              const total = t.players.reduce((s, p) => s + weightOf(p), 0);
+              return (
+                <div
+                  key={t.id}
+                  className={`panel rounded-xl p-3.5 transition-all ${
+                    onClock ? "ring-1 ring-[var(--accent)]" : ""
+                  }`}
+                  style={{ borderColor: accent }}
+                >
+                  <div className="mb-2.5 flex items-baseline justify-between gap-1">
+                    <h2 className="text-base font-extrabold" style={{ color: accent }}>
+                      Team {t.id}
+                    </h2>
+                    <span className="text-[11px] font-bold tabular-nums text-zinc-200">
+                      {total} {unit}
+                    </span>
+                  </div>
+                  <ul className="flex flex-col gap-1.5">
+                    {t.players.map((p) => (
+                      <li
+                        key={p.id}
+                        className="flex items-center justify-between gap-2 text-[13px]"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          {p.id === t.captain.id && (
+                            <span
+                              title="Captain"
+                              className="shrink-0 rounded bg-[var(--accent)]/20 px-1 text-[10px] font-bold text-[var(--lg-glow)]"
+                            >
+                              C
+                            </span>
+                          )}
+                          {p.role && (
+                            <span
+                              title={ROLE_LABELS[p.role]}
+                              className="shrink-0 rounded bg-white/10 px-1 text-[10px] font-bold tabular-nums text-zinc-300"
+                            >
+                              {p.role}
+                            </span>
+                          )}
+                          <span className="truncate font-medium">{p.name}</span>
+                        </span>
+                        <span className="shrink-0 tabular-nums text-zinc-400">{weightOf(p)}</span>
+                      </li>
+                    ))}
+                    {Array.from({ length: Math.max(0, draft.teamSize - t.players.length) }).map(
+                      (_, k) => (
+                        <li
+                          key={`empty-${k}`}
+                          className="rounded border border-dashed border-[var(--panel-border)] px-1 py-1 text-[13px] text-zinc-700"
+                        >
+                          —
+                        </li>
+                      )
+                    )}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* Teams ready but hidden — reveal on demand */}
       {result && !revealed && (
         <section className="panel flex flex-col items-center gap-4 rounded-2xl py-14 text-center">
-          <p className="text-zinc-400">Teams are ready.</p>
+          <p className="text-lg font-semibold text-zinc-100">
+            {result.teams.length} teams are ready.
+          </p>
+          <p className="-mt-2 text-sm text-zinc-500">
+            Balanced by {mode === "random" ? "random shuffle" : unit} · hidden until you reveal them.
+          </p>
           <button
             onClick={() => setRevealed(true)}
             className="btn-neon rounded-full px-8 py-3 text-sm"
@@ -935,7 +1459,7 @@ export default function Balancer() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="flex flex-wrap items-center gap-x-2 text-sm text-zinc-400">
               <span>
-                LR spread:{" "}
+                {unit} spread:{" "}
                 <span
                   className={`font-bold ${
                     !edited
@@ -984,7 +1508,16 @@ export default function Balancer() {
             </div>
           </div>
           <p className="-mt-2 text-xs text-zinc-500">
-            Drag a player onto another player to swap them. Team LR updates as you go.
+            {picked ? (
+              <span className="text-[var(--lg-glow)]">
+                Now pick who to swap with — or tap the same player to cancel.
+              </span>
+            ) : (
+              <>
+                Drag a player onto another to swap them — or tap one, then the other. Team{" "}
+                {unit} updates as you go.
+              </>
+            )}
           </p>
 
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -1018,10 +1551,10 @@ export default function Balancer() {
                       Team {team.id}
                     </h2>
                     <span
-                      title={`${team.totalMmr} MMR`}
+                      title={`${team.totalMmr} total MMR · ${team.players.length} players`}
                       className="text-[11px] font-bold tabular-nums text-zinc-200"
                     >
-                      {teamLr(team)} LR
+                      {teamLr(team)} {unit}
                     </span>
                   </div>
                   <ul className="flex flex-col gap-1.5">
@@ -1029,10 +1562,12 @@ export default function Balancer() {
                       const isDragging = dragging?.playerId === p.id;
                       const isTarget =
                         dragOver?.playerId === p.id && dragging && dragging.playerId !== p.id;
+                      const isPicked = picked?.playerId === p.id;
                       return (
                         <li
                           key={p.id}
                           draggable
+                          onClick={() => pickPlayer(team.id, p.id)}
                           onDragStart={() => setDragging({ teamId: team.id, playerId: p.id })}
                           onDragEnd={() => {
                             setDragging(null);
@@ -1050,10 +1585,16 @@ export default function Balancer() {
                             setDragging(null);
                             setDragOver(null);
                           }}
-                          title="Drag onto another player to swap"
+                          title="Drag onto another player to swap — or tap two players"
                           className={`flex cursor-grab items-center justify-between gap-2 rounded-md px-1 py-0.5 text-[13px] transition-colors active:cursor-grabbing ${
                             isDragging ? "opacity-40" : ""
-                          } ${isTarget ? "bg-[var(--accent)]/20 ring-1 ring-[var(--accent)]" : "hover:bg-white/5"}`}
+                          } ${
+                            isPicked
+                              ? "bg-[var(--accent)]/25 ring-1 ring-[var(--accent)]"
+                              : isTarget
+                                ? "bg-[var(--accent)]/20 ring-1 ring-[var(--accent)]"
+                                : "hover:bg-white/5"
+                          }`}
                         >
                           <span className="flex items-center gap-1.5 truncate">
                             {p.role && (
@@ -1067,10 +1608,14 @@ export default function Balancer() {
                             <span className="truncate font-medium">{p.name}</span>
                           </span>
                           <span
-                            title={`${p.mmr} MMR`}
+                            title={
+                              resultBasis === "mmr"
+                                ? `${lrOf(p.mmr, p.email)} LR`
+                                : `${p.mmr} MMR`
+                            }
                             className="shrink-0 tabular-nums text-zinc-400"
                           >
-                            {lrOf(p.mmr, p.email)} LR
+                            {weightOf(p)} {unit}
                           </span>
                         </li>
                       );

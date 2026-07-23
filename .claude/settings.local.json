@@ -54,7 +54,13 @@
       "PowerShell(Get-Process -Name node -ErrorAction SilentlyContinue | Select-Object Id, StartTime, @{N='WS_MB';E={[math]::Round\\($_.WorkingSet64/1MB\\)}} | Format-Table -AutoSize)",
       "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/verify-reseed.mjs\")",
       "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/show-drift.mjs\")",
-      "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/find-dupes.mjs\")"
+      "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/find-dupes.mjs\")",
+      "Bash(grep -n \"mode, basis\\\\|JSON.stringify\\({ players, numTeams\" src/app/balancer.tsx)",
+      "Bash(cp src/app/balancer.tsx /tmp/mine.tsx)",
+      "Bash(cp /tmp/head-bal.tsx src/app/balancer.tsx)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
     ]
   }
 }
