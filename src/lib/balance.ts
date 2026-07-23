@@ -2,6 +2,13 @@ import type { Player, Role, Team } from "./types";
 
 export type BalanceMode = "mmr" | "role" | "random";
 
+/**
+ * What team strength is measured by. "lr" weights by each player's current
+ * LoungeE Rating (form-aware); "mmr" weights by their raw peak MMR. Independent
+ * of BalanceMode — either basis works with any strategy.
+ */
+export type BalanceBasis = "lr" | "mmr";
+
 export interface BalanceResult {
   teams: Team[];
   spread: number;

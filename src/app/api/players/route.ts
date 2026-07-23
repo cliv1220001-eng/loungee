@@ -38,10 +38,26 @@ export async function GET(request: Request) {
     const sb = getSupabase();
     const month = new URL(request.url).searchParams.get("month");
 
-    const { data: players, error: pErr } = await sb
-      .from("players")
-      .select("email,ign,peak_mmr,position,starting_lr,lr");
-    if (pErr) throw new Error(pErr.message);
+    // Paged for the same 1,000-row reason as the events query below.
+    const PLAYER_PAGE = 1000;
+    const players: {
+      email: string;
+      ign: string;
+      peak_mmr: number;
+      position: number | null;
+      starting_lr: number;
+      lr: number;
+    }[] = [];
+    for (let from = 0; ; from += PLAYER_PAGE) {
+      const { data, error: pErr } = await sb
+        .from("players")
+        .select("email,ign,peak_mmr,position,starting_lr,lr")
+        .range(from, from + PLAYER_PAGE - 1);
+      if (pErr) throw new Error(pErr.message);
+      const page = data ?? [];
+      players.push(...page);
+      if (page.length < PLAYER_PAGE) break;
+    }
 
     if (!month) {
       const sorted = [...(players ?? [])].sort(
@@ -60,12 +76,23 @@ export async function GET(request: Request) {
     const start = new Date(Date.UTC(year, mon - 1, 1)).toISOString();
     const end = new Date(Date.UTC(year, mon, 1)).toISOString();
 
-    const { data: events, error: eErr } = await sb
-      .from("lr_events")
-      .select("email,delta")
-      .gte("created_at", start)
-      .lt("created_at", end);
-    if (eErr) throw new Error(eErr.message);
+    // Page through the month's events. PostgREST caps a response at 1,000 rows
+    // by default and does NOT report truncation, so a single query silently
+    // under-counts every total once a month exceeds that many events.
+    const PAGE = 1000;
+    const events: { email: string; delta: number }[] = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error: eErr } = await sb
+        .from("lr_events")
+        .select("email,delta")
+        .gte("created_at", start)
+        .lt("created_at", end)
+        .range(from, from + PAGE - 1);
+      if (eErr) throw new Error(eErr.message);
+      const page = data ?? [];
+      events.push(...page);
+      if (page.length < PAGE) break;
+    }
 
     // Per player: net LR earned plus win/loss tallies. A positive delta is a win
     // (+40, or +60 for the champion match); a negative delta is a loss.

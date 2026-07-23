@@ -25,6 +25,8 @@ interface SyncBody {
   runId?: string;
   players?: PlayerInput[];
   matches?: MatchInput[];
+  /** How many teams are in this bracket — decides the champion bonus. */
+  teamCount?: number;
 }
 
 function normEmail(e: string | undefined): string {
@@ -64,6 +66,13 @@ export async function POST(request: Request) {
       if (row.email) byEmail.set(row.email, row);
     }
 
+    // Team count decides the champion bonus: a two-team bracket's final is just
+    // an ordinary win. Fall back to a multi-team bracket when the client didn't
+    // send a count, so older clients keep the bonus rather than silently losing it.
+    const teamCount = Number.isFinite(Number(body.teamCount))
+      ? Math.max(0, Math.floor(Number(body.teamCount)))
+      : 3;
+
     // One event per (match, player); winners gain, losers lose.
     const events: { match_id: string; email: string; delta: number }[] = [];
     for (const m of body.matches ?? []) {
@@ -71,11 +80,15 @@ export async function POST(request: Request) {
       const champ = Boolean(m.championMatch);
       for (const raw of m.winnerEmails ?? []) {
         const email = normEmail(raw);
-        if (email) events.push({ match_id: m.matchId, email, delta: matchDelta(true, champ) });
+        if (email) {
+          events.push({ match_id: m.matchId, email, delta: matchDelta(true, champ, teamCount) });
+        }
       }
       for (const raw of m.loserEmails ?? []) {
         const email = normEmail(raw);
-        if (email) events.push({ match_id: m.matchId, email, delta: matchDelta(false, champ) });
+        if (email) {
+          events.push({ match_id: m.matchId, email, delta: matchDelta(false, champ, teamCount) });
+        }
       }
     }
 

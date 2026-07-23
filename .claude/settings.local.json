@@ -50,7 +50,11 @@
       "Bash(JAR=\"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/cookies.txt\" node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-balance.mjs\")",
       "Bash(JAR=\"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/cookies.txt\" node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-variety.mjs\")",
       "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/test-drop.mjs\")",
-      "Bash(curl -s -o /dev/null -w \"port 3000: %{http_code}\\\\n\" --max-time 5 \"http://localhost:3000/login\")"
+      "Bash(curl -s -o /dev/null -w \"port 3000: %{http_code}\\\\n\" --max-time 5 \"http://localhost:3000/login\")",
+      "PowerShell(Get-Process -Name node -ErrorAction SilentlyContinue | Select-Object Id, StartTime, @{N='WS_MB';E={[math]::Round\\($_.WorkingSet64/1MB\\)}} | Format-Table -AutoSize)",
+      "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/verify-reseed.mjs\")",
+      "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/show-drift.mjs\")",
+      "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/find-dupes.mjs\")"
     ]
   }
 }

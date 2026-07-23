@@ -7,62 +7,66 @@
 
 export const WIN_LR = 40;
 export const LOSS_LR = -40;
-/** Winning the championship match is worth this instead of WIN_LR. */
-export const CHAMPION_LR = 60;
+/**
+ * Winning the championship match of a bracket with MORE THAN TWO teams is worth
+ * this instead of WIN_LR. A two-team bracket is a single match, so its "final"
+ * is just an ordinary win and pays WIN_LR — there was no field to beat.
+ */
+export const CHAMPION_LR = 80;
 
 /**
- * Starting LR from peak MMR — the MERGED scale:
- *   • below 5,600 MMR → the ranked table (bands of 1,000: 800 … 1,300)
- *   • 5,600 MMR and up → the high-MMR table (1,300 … 1,700)
+ * Peak MMR → starting LR and rank, on a flat 1,000-MMR grid.
+ *
+ * Each band carries BOTH its starting LR and its rank name, so the two can never
+ * drift apart: rescaling LR is a matter of editing the `lr` column here, and the
+ * ranks keep working (they are not keyed by the LR value).
+ *
  * Bands are listed high-to-low; the first one the MMR clears wins.
+ *
+ * NOTE: these values must stay in sync with the seeded `players.starting_lr` in
+ * Supabase — see supabase/reseed-lr.sql. Changing them here without re-running
+ * that migration leaves newly-registered players on a different scale.
  */
-const STARTING_LR_BANDS: { minMmr: number; lr: number }[] = [
-  // high-MMR table (governs from 5,600 up)
-  { minMmr: 10000, lr: 1700 },
-  { minMmr: 8500, lr: 1600 },
-  { minMmr: 7500, lr: 1500 },
-  { minMmr: 6500, lr: 1400 },
-  { minMmr: 5600, lr: 1300 },
-  // ranked table (governs below 5,600)
-  { minMmr: 5000, lr: 1300 },
-  { minMmr: 4000, lr: 1200 },
-  { minMmr: 3000, lr: 1100 },
-  { minMmr: 2000, lr: 1000 },
-  { minMmr: 1000, lr: 900 },
-  { minMmr: 0, lr: 800 },
+const BANDS: { minMmr: number; lr: number; rank: string }[] = [
+  { minMmr: 10000, lr: 5300, rank: "Immortal" },
+  { minMmr: 8000, lr: 4600, rank: "Legend" },
+  { minMmr: 7000, lr: 3950, rank: "Grandmaster" },
+  { minMmr: 6000, lr: 3350, rank: "Master" },
+  { minMmr: 5000, lr: 2800, rank: "Diamond" },
+  { minMmr: 4000, lr: 2300, rank: "Platinum" },
+  { minMmr: 3000, lr: 1850, rank: "Gold" },
+  { minMmr: 2000, lr: 1450, rank: "Silver" },
+  { minMmr: 1000, lr: 1100, rank: "Bronze" },
+  { minMmr: 0, lr: 800, rank: "Recruit" },
 ];
+
+/** The band a peak MMR falls into (never null — the last band starts at 0). */
+function bandOf(peakMmr: number) {
+  const mmr = Number.isFinite(peakMmr) ? peakMmr : 0;
+  return BANDS.find((b) => mmr >= b.minMmr) ?? BANDS[BANDS.length - 1];
+}
 
 /** The LR a player starts with, based on their peak MMR. */
 export function startingLr(peakMmr: number): number {
-  const mmr = Number.isFinite(peakMmr) ? peakMmr : 0;
-  const band = STARTING_LR_BANDS.find((b) => mmr >= b.minMmr);
-  return band ? band.lr : 800;
+  return bandOf(peakMmr).lr;
+}
+
+export function rankOf(peakMmr: number): string {
+  return bandOf(peakMmr).rank;
 }
 
 /**
- * Rank names map 1:1 onto the starting-LR tiers (Recruit at 800 … Immortal at
- * 1700). Deriving rank from starting LR means it follows the merged MMR→LR scale
- * automatically, so a high-MMR player's rank matches their (high-MMR-table) LR.
+ * LR change for one match result.
+ *
+ * Winning the championship match pays CHAMPION_LR (+80), but ONLY when the
+ * bracket had more than two teams. With exactly two teams the whole bracket is
+ * one match, so winning it is an ordinary win (+40) — there is no field to
+ * outlast. Losses are always LOSS_LR.
+ *
+ * `teamCount` defaults to a multi-team bracket so existing callers that don't
+ * pass it keep the champion bonus.
  */
-const RANK_BY_LR: Record<number, string> = {
-  1700: "Immortal",
-  1600: "Legend",
-  1500: "Grandmaster",
-  1400: "Master",
-  1300: "Diamond",
-  1200: "Platinum",
-  1100: "Gold",
-  1000: "Silver",
-  900: "Bronze",
-  800: "Recruit",
-};
-
-export function rankOf(peakMmr: number): string {
-  return RANK_BY_LR[startingLr(peakMmr)] ?? "Recruit";
-}
-
-/** LR change for one match result. `championMatch` upgrades a win to +60. */
-export function matchDelta(won: boolean, championMatch: boolean): number {
+export function matchDelta(won: boolean, championMatch: boolean, teamCount = 3): number {
   if (!won) return LOSS_LR;
-  return championMatch ? CHAMPION_LR : WIN_LR;
+  return championMatch && teamCount > 2 ? CHAMPION_LR : WIN_LR;
 }

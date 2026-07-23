@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { startingLr } from "@/lib/lr";
-import { generateTeams, type BalanceMode, type BalanceResult } from "@/lib/balance";
+import {
+  generateTeams,
+  type BalanceBasis,
+  type BalanceMode,
+  type BalanceResult,
+} from "@/lib/balance";
 import type { Player, Role } from "@/lib/types";
 
 // --- Route -------------------------------------------------------------------
@@ -17,6 +22,7 @@ interface TeamsBody {
   players?: PlayerInput[];
   numTeams?: number;
   mode?: BalanceMode;
+  basis?: BalanceBasis;
 }
 
 function normalize(p: PlayerInput, i: number): Player {
@@ -36,6 +42,8 @@ export async function POST(request: Request) {
     const numTeams = Math.max(1, Math.floor(Number(body.numTeams) || 0));
     const mode: BalanceMode =
       body.mode === "role" || body.mode === "random" ? body.mode : "mmr";
+    // Default to LR — the ladder rating is the app's primary measure of strength.
+    const basis: BalanceBasis = body.basis === "mmr" ? "mmr" : "lr";
     const players = (body.players ?? []).map(normalize).filter((p) => p.name !== "");
 
     if (players.length === 0) {
@@ -47,8 +55,19 @@ export async function POST(request: Request) {
     const lrByEmail = new Map<string, number>();
     try {
       const sb = getSupabase();
-      const { data } = await sb.from("players").select("email,lr");
-      for (const r of (data ?? []) as { email: string; lr: number }[]) lrByEmail.set(r.email, r.lr);
+      // Page through the registry: PostgREST caps responses at 1,000 rows and
+      // gives no truncation signal, which would silently drop LR for everyone
+      // past that row and balance those players on their starting LR instead.
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data } = await sb
+          .from("players")
+          .select("email,lr")
+          .range(from, from + PAGE - 1);
+        const page = (data ?? []) as { email: string; lr: number }[];
+        for (const r of page) lrByEmail.set(r.email, r.lr);
+        if (page.length < PAGE) break;
+      }
     } catch {
       // no LR data — continue
     }
@@ -59,12 +78,17 @@ export async function POST(request: Request) {
 
     let res: BalanceResult;
     if (mode === "mmr" || mode === "role") {
-      // "Balance LR" and "Spread Roles" both balance on current LR: weight by LR
-      // on copies (LR written into the mmr field the balancer reads), then map
-      // back to the real players so their real mmr/email are never altered. In
-      // role mode the balancer may assign a lane to an "Any" player, so keep the
-      // role IT chose while restoring the real mmr/email/name.
-      const weighted = players.map((p) => ({ ...p, mmr: Math.round(currentLr(p)) }));
+      // Balance and Spread Roles both weight teams by the chosen basis. The
+      // balancer only ever reads `mmr`, so on an LR basis we copy each player's
+      // current LR into that field, then map back to the real players so their
+      // real mmr/email are never altered. On an MMR basis the copies keep their
+      // real MMR (the map-back is then a no-op for weights). In role mode the
+      // balancer may assign a lane to an "Any" player, so keep the role IT chose
+      // while restoring the real mmr/email/name.
+      const weighted =
+        basis === "lr"
+          ? players.map((p) => ({ ...p, mmr: Math.round(currentLr(p)) }))
+          : players;
       const out = generateTeams(weighted, numTeams, mode);
       const byId = new Map(players.map((p) => [p.id, p]));
       res = {

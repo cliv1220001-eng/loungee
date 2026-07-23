@@ -201,7 +201,7 @@ export default function BracketView() {
     fetch("/api/lr/sync", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ runId: run.runId, players, matches }),
+      body: JSON.stringify({ runId: run.runId, players, matches, teamCount: teams.length }),
       signal: ctrl.signal,
     })
       .then(() => refreshLr()) // pull the recomputed LR back so the bracket updates

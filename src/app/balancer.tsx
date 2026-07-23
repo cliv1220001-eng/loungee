@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import type { BalanceMode, BalanceResult } from "@/lib/balance";
+import type { BalanceBasis, BalanceMode, BalanceResult } from "@/lib/balance";
 import { startingLr } from "@/lib/lr";
 import { saveTeams, startBracketRun, usePersistentState } from "@/lib/store";
 import { ROLE_LABELS, type Role, type Team } from "@/lib/types";
@@ -41,10 +41,17 @@ function registerPlayers(players: ReturnType<typeof registryFromTeams>): void {
 
 const ROLES: Role[] = [1, 2, 3, 4, 5];
 
+// Strategies. What they weight by (LR or MMR) is chosen separately — see BASES.
 const MODES: { key: BalanceMode; label: string; hint: string }[] = [
-  { key: "mmr", label: "Balance LR", hint: "Closest total LR" },
-  { key: "role", label: "Spread Roles", hint: "Even roles + MMR" },
+  { key: "mmr", label: "Balance", hint: "Closest team totals" },
+  { key: "role", label: "Spread Roles", hint: "Even roles + balanced" },
   { key: "random", label: "Random", hint: "Shuffle without weighting" },
+];
+
+/** The measure of strength the balancer weights by (ignored by Random). */
+const BASES: { key: BalanceBasis; label: string; hint: string }[] = [
+  { key: "lr", label: "LR", hint: "Current ladder rating" },
+  { key: "mmr", label: "MMR", hint: "Raw peak MMR" },
 ];
 
 const TEAM_ACCENTS = [
@@ -82,13 +89,24 @@ function blankRows(n: number): DraftPlayer[] {
 interface BalancerSession {
   rows: DraftPlayer[];
   mode: BalanceMode;
+  /** Weight teams by current LR (default) or raw peak MMR. */
+  basis?: BalanceBasis;
   result: BalanceResult | null;
   /** The untouched generated teams, kept so manual edits can be reverted. */
   generated?: BalanceResult | null;
+  /** The basis the current result was generated with, so totals stay truthful. */
+  resultBasis?: BalanceBasis;
 }
 
 const SESSION_KEY = "dota-balancer:session";
-const DEFAULT_SESSION: BalancerSession = { rows: blankRows(10), mode: "mmr", result: null, generated: null };
+const DEFAULT_SESSION: BalancerSession = {
+  rows: blankRows(10),
+  mode: "mmr",
+  basis: "lr",
+  result: null,
+  generated: null,
+  resultBasis: "lr",
+};
 
 // The tournament currently being worked on. Its roster/teams auto-save under this
 // name so it can be reloaded from history later.
