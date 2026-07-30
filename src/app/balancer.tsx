@@ -14,6 +14,7 @@ import {
   type DraftState,
 } from "@/lib/draft";
 import DraftReveal from "./draft-reveal";
+import TeamReel from "./team-reel";
 import { startingLr } from "@/lib/lr";
 import { saveTeams, startBracketRun, usePersistentState } from "@/lib/store";
 import { ROLE_LABELS, type Role, type Team } from "@/lib/types";
@@ -225,6 +226,8 @@ export default function Balancer() {
   const [shuffleKey, setShuffleKey] = useState(0);
   const [shuffling, setShuffling] = useState(false);
   const [revealed, setRevealed] = useState(false);
+  /** True while the slot-machine reveal is playing on freshly built teams. */
+  const [reeling, setReeling] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [genError, setGenError] = useState<string | null>(null);
@@ -619,7 +622,8 @@ export default function Balancer() {
     const recentPairs = result ? [...pairsOf(result.teams)] : [];
 
     setShuffling(true);
-    setRevealed(false); // keep the new teams hidden until the user reveals them
+    setRevealed(false); // hidden until the slot-machine reveal finishes
+    setReeling(false);
     setGenError(null);
     try {
       // Team generation runs on the server (/api/teams). The response is the exact
@@ -644,6 +648,8 @@ export default function Balancer() {
       const fresh = body as BalanceResult;
       setSession((s) => ({ ...s, result: fresh, generated: fresh, resultBasis: basis }));
       setShuffleKey((k) => k + 1);
+      // Play the slot-machine reveal, which then flips `revealed` on.
+      setReeling(true);
     } catch (e) {
       setGenError(e instanceof Error ? e.message : "Could not generate teams.");
     }
@@ -1560,19 +1566,34 @@ export default function Balancer() {
         );
       })()}
 
-      {/* Teams ready but hidden — reveal on demand */}
-      {result && !revealed && (
+      {/* Slot-machine reveal of freshly built teams. Names cycle in each slot
+          and lock one by one, then it flips to the real results below. */}
+      {result && reeling && !revealed && (
+        <TeamReel
+          key={shuffleKey}
+          teams={result.teams}
+          unit={unit}
+          totalOf={teamLr}
+          weightOf={weightOf}
+          onDone={() => {
+            setReeling(false);
+            setRevealed(true);
+          }}
+          onSkip={() => {
+            setReeling(false);
+            setRevealed(true);
+          }}
+        />
+      )}
+
+      {/* Teams generated but not revealed and not currently reeling — e.g. a
+          restored session. A simple gate to show them. */}
+      {result && !revealed && !reeling && (
         <section className="panel flex flex-col items-center gap-4 rounded-2xl py-14 text-center">
           <p className="text-lg font-semibold text-zinc-100">
             {result.teams.length} teams are ready.
           </p>
-          <p className="-mt-2 text-sm text-zinc-500">
-            Balanced by {mode === "random" ? "random shuffle" : unit} · hidden until you reveal them.
-          </p>
-          <button
-            onClick={() => setRevealed(true)}
-            className="btn-neon rounded-full px-8 py-3 text-sm"
-          >
+          <button onClick={() => setRevealed(true)} className="btn-neon rounded-full px-8 py-3 text-sm">
             Show Teams
           </button>
         </section>
