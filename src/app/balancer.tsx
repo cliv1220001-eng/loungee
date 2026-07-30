@@ -955,15 +955,19 @@ export default function Balancer() {
                 aria-pressed={active}
                 className={`panel flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-all ${
                   active
-                    ? "ring-1 ring-[var(--accent)]"
-                    : "opacity-70 hover:opacity-100"
+                    ? "ring-2 ring-[var(--accent)] bg-[var(--accent)]/[0.06]"
+                    : "opacity-60 hover:opacity-100 hover:bg-white/[0.02]"
                 }`}
               >
                 <span
-                  className={`h-2 w-2 shrink-0 rounded-full ${
-                    active ? "bg-[var(--accent)]" : "bg-zinc-600"
+                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                    active
+                      ? "border-[var(--accent)] bg-[var(--accent)]"
+                      : "border-zinc-600"
                   }`}
-                />
+                >
+                  {active && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                </span>
                 <span className="flex flex-col">
                   <span className="font-semibold">{m.label}</span>
                   <span className="text-xs text-zinc-400">
@@ -979,75 +983,90 @@ export default function Balancer() {
           })}
         </div>
 
-        <div
-          className={`flex flex-wrap items-center gap-3 transition-opacity ${
-            mode === "random" ? "opacity-40" : ""
-          }`}
-        >
-          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-            Balance by
-          </span>
-          <div className="panel flex rounded-full p-1">
-            {BASES.map((b) => (
-              <button
-                key={b.key}
-                onClick={() => setBasis(b.key)}
-                disabled={mode === "random"}
-                title={b.hint}
-                aria-pressed={basis === b.key}
-                className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
-                  basis === b.key ? "btn-neon" : "text-zinc-400 hover:text-white"
-                }`}
-              >
-                {b.label}
-              </button>
-            ))}
+        {/* Secondary settings: what strength is measured by, and the LR stake.
+            Grouped into one panel with aligned labels so the rows read as a set. */}
+        <div className="panel flex flex-col divide-y divide-[var(--panel-border)] rounded-xl">
+          {/* Balance by */}
+          <div
+            className={`flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 transition-opacity ${
+              mode === "random" ? "opacity-40" : ""
+            }`}
+          >
+            <span className="w-20 shrink-0 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+              Balance by
+            </span>
+            <div className="flex rounded-full bg-black/20 p-1">
+              {BASES.map((b) => (
+                <button
+                  key={b.key}
+                  onClick={() => setBasis(b.key)}
+                  disabled={mode === "random"}
+                  title={b.hint}
+                  aria-pressed={basis === b.key}
+                  className={`rounded-full px-4 py-1 text-sm font-semibold transition-colors ${
+                    basis === b.key ? "btn-neon" : "text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  {b.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-zinc-500">
+              {mode === "random"
+                ? "Random ignores skill entirely."
+                : mode === "draft"
+                  ? `Captains are the top ${basis === "lr" ? "LR" : "MMR"}; cards show ${basis === "lr" ? "LR" : "MMR"}.`
+                  : BASES.find((b) => b.key === basis)?.hint}
+            </span>
           </div>
-          <span className="text-xs text-zinc-500">
-            {mode === "random"
-              ? "Random ignores skill entirely."
-              : mode === "draft"
-                ? `Captains are the top ${basis === "lr" ? "LR" : "MMR"} players; cards show ${basis === "lr" ? "LR" : "MMR"}.`
-                : BASES.find((b) => b.key === basis)?.hint}
-          </span>
-        </div>
 
-        {/* LR bet — one stake for the whole tournament. When set, every match
-            win/loss pays ±stake instead of the normal +40/−40/+80 scale. */}
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-            LR bet
-          </span>
-          <div className="relative flex items-center">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={stake > 0 ? String(stake) : ""}
-              onChange={(e) => setStake(Number(e.target.value.replace(/[^0-9]/g, "").slice(0, 6)))}
-              placeholder="Off"
-              className="field w-28 rounded-lg py-1.5 pl-3 pr-9 text-sm tabular-nums"
-            />
-            <span className="pointer-events-none absolute right-3 text-xs text-zinc-500">LR</span>
+          {/* LR bet — one stake for the whole tournament. Overrides the normal
+              +40/−40/+80 scale so every match win/loss pays ±stake. */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
+            <span className="w-20 shrink-0 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+              LR bet
+            </span>
+            <div className="flex items-center gap-2">
+              <div className="relative flex items-center">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={stake > 0 ? String(stake) : ""}
+                  onChange={(e) =>
+                    setStake(Number(e.target.value.replace(/[^0-9]/g, "").slice(0, 6)))
+                  }
+                  placeholder="Off"
+                  aria-label="LR bet stake"
+                  className={`field w-24 rounded-full py-1 pl-3 pr-8 text-sm font-semibold tabular-nums ${
+                    stake > 0 ? "text-[var(--lg-glow)]" : ""
+                  }`}
+                />
+                <span className="pointer-events-none absolute right-3 text-[10px] uppercase text-zinc-500">
+                  LR
+                </span>
+              </div>
+              {stake > 0 && (
+                <button
+                  onClick={() => setStake(0)}
+                  aria-label="Clear LR bet"
+                  className="rounded-full px-2 py-1 text-xs font-semibold text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <span className="text-xs text-zinc-500">
+              {stake > 0 ? (
+                <>
+                  Winners{" "}
+                  <span className="font-semibold text-emerald-400">+{stake}</span>, losers{" "}
+                  <span className="font-semibold text-red-400">−{stake}</span> LR every match.
+                </>
+              ) : (
+                "Off — standard +40 / −40 / +80 scoring."
+              )}
+            </span>
           </div>
-          {stake > 0 && (
-            <button
-              onClick={() => setStake(0)}
-              className="text-xs font-semibold text-zinc-400 transition-colors hover:text-white"
-            >
-              Clear
-            </button>
-          )}
-          <span className="text-xs text-zinc-500">
-            {stake > 0 ? (
-              <>
-                Every match: winners{" "}
-                <span className="font-semibold text-emerald-400">+{stake}</span>, losers{" "}
-                <span className="font-semibold text-red-400">−{stake}</span> LR.
-              </>
-            ) : (
-              "Leave blank for standard +40 / −40 / +80 scoring."
-            )}
-          </span>
         </div>
       </div>
 

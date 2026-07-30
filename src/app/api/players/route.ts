@@ -132,22 +132,18 @@ export async function GET(request: Request) {
       if (page.length < PAGE) break;
     }
 
-    // Per player: net LR earned plus win/loss tallies. Event kinds:
-    //   'match' — a real game: counts toward earned AND win/loss (by delta sign).
-    //   'carry' — a season head start: counts toward earned only, never a win.
-    //   'reset' — a season-close adjustment: IGNORED here, so viewing a past
-    //             month still shows that month's true match earnings. This is
-    //             what keeps July (and every prior month) intact for history.
+    // "LR earned" and W/L count ONLY real match rows. Season bookkeeping is
+    // excluded: the 30% carry-over is folded into starting_lr (not an event), and
+    // 'reset' rows just remove a closed month's earnings from the all-time total.
+    // So a past month always shows its true match earnings, and a freshly-reset
+    // month starts at 0 earned until real games are played.
     const stats = new Map<string, { earned: number; wins: number; losses: number }>();
     for (const ev of events ?? []) {
-      const kind = ev.kind ?? "match";
-      if (kind === "reset") continue;
+      if ((ev.kind ?? "match") !== "match") continue;
       const s = stats.get(ev.email) ?? { earned: 0, wins: 0, losses: 0 };
       s.earned += ev.delta;
-      if (kind === "match") {
-        if (ev.delta > 0) s.wins++;
-        else if (ev.delta < 0) s.losses++;
-      }
+      if (ev.delta > 0) s.wins++;
+      else if (ev.delta < 0) s.losses++;
       stats.set(ev.email, s);
     }
 
