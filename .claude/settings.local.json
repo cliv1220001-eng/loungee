@@ -57,7 +57,9 @@
       "Bash(node \"C:/Users/test/AppData/Local/Temp/claude/c--Users-test-dota-balancer/4907e3bb-7139-4bf4-886a-08145334dc30/scratchpad/find-dupes.mjs\")",
       "Bash(grep -n \"mode, basis\\\\|JSON.stringify\\({ players, numTeams\" src/app/balancer.tsx)",
       "Bash(cp src/app/balancer.tsx /tmp/mine.tsx)",
-      "Bash(cp /tmp/head-bal.tsx src/app/balancer.tsx)"
+      "Bash(cp /tmp/head-bal.tsx src/app/balancer.tsx)",
+      "Bash(echo \"LINT=$?\")",
+      "Bash(rm -f __TRACKED_VAR__/season-sim.mjs __TRACKED_VAR__/eu.mjs)"
     ],
     "additionalDirectories": [
       "\\tmp"

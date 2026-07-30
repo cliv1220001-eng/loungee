@@ -65,8 +65,20 @@ export function rankOf(peakMmr: number): string {
  *
  * `teamCount` defaults to a multi-team bracket so existing callers that don't
  * pass it keep the champion bonus.
+ *
+ * `stake` is an LR BET set by the organizer for a whole tournament. When it is a
+ * positive number it REPLACES the standard scale entirely: every win pays
+ * +stake and every loss −stake, flat across all matches (the champion bonus does
+ * not apply — the stake is the whole point). Omit or pass 0/undefined for normal
+ * scoring.
  */
-export function matchDelta(won: boolean, championMatch: boolean, teamCount = 3): number {
+export function matchDelta(
+  won: boolean,
+  championMatch: boolean,
+  teamCount = 3,
+  stake?: number
+): number {
+  if (stake && stake > 0) return won ? stake : -stake;
   if (!won) return LOSS_LR;
   return championMatch && teamCount > 2 ? CHAMPION_LR : WIN_LR;
 }

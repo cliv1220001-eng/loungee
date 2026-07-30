@@ -53,6 +53,100 @@ function signed(n: number): string {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/**
+ * Month chips for a year, with a year stepper. Unlike the native month input,
+ * FUTURE months are selectable — so a season carry-over can be previewed before
+ * that month actually arrives. The current month is marked; future months are
+ * dimmed but clickable and labelled "upcoming".
+ */
+function MonthPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (m: string) => void;
+}) {
+  const now = new Date();
+  const nowYm = now.getFullYear() * 100 + (now.getMonth() + 1);
+  const [selY, selM] = value.split("-").map(Number);
+  // The year of chips currently shown follows the selection.
+  const [viewYear, setViewYear] = useState(selY || now.getFullYear());
+
+  const ym = (y: number, m: number) => y * 100 + m;
+
+  return (
+    <div className="panel flex flex-col gap-2 rounded-xl p-3">
+      <div className="flex items-center justify-between px-1">
+        <button
+          onClick={() => setViewYear((y) => y - 1)}
+          aria-label="Previous year"
+          className="rounded-md px-2 py-1 text-sm text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
+        >
+          ←
+        </button>
+        <span className="text-sm font-bold tabular-nums text-zinc-100">{viewYear}</span>
+        <button
+          onClick={() => setViewYear((y) => y + 1)}
+          aria-label="Next year"
+          className="rounded-md px-2 py-1 text-sm text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
+        >
+          →
+        </button>
+      </div>
+
+      <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-6">
+        {MONTH_ABBR.map((label, i) => {
+          const m = i + 1;
+          const isSel = viewYear === selY && m === selM;
+          const isNow = ym(viewYear, m) === nowYm;
+          const isFuture = ym(viewYear, m) > nowYm;
+          return (
+            <button
+              key={m}
+              onClick={() => onChange(`${viewYear}-${String(m).padStart(2, "0")}`)}
+              title={isFuture ? "Upcoming month — preview only" : undefined}
+              className={`relative rounded-lg px-2 py-2 text-sm font-semibold transition-all ${
+                isSel
+                  ? "btn-neon"
+                  : isFuture
+                    ? "text-zinc-500 hover:bg-white/5 hover:text-zinc-300"
+                    : "text-zinc-300 hover:bg-white/5 hover:text-white"
+              }`}
+            >
+              {label}
+              {isNow && !isSel && (
+                <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center justify-between px-1 text-xs text-zinc-500">
+        <span>
+          Viewing <span className="text-zinc-300">{monthLabel(value)}</span>
+          {ym(selY, selM) > nowYm && (
+            <span className="ml-1.5 rounded-full bg-amber-400/10 px-2 py-0.5 font-semibold text-amber-300">
+              upcoming
+            </span>
+          )}
+        </span>
+        <button
+          onClick={() => onChange(thisMonth())}
+          className="font-semibold text-[var(--lg-glow)] transition-opacity hover:opacity-80"
+        >
+          This month
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function LeaderboardPage() {
   // "" = all-time; otherwise a YYYY-MM month.
   const [month, setMonth] = useState<string>("");
@@ -97,8 +191,8 @@ export default function LeaderboardPage() {
       </header>
 
       {/* Filter: all-time vs a specific month */}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="panel flex rounded-full p-1">
+      <div className="flex flex-col gap-3">
+        <div className="panel flex w-fit rounded-full p-1">
           <button
             onClick={() => setMonth("")}
             className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
@@ -116,15 +210,8 @@ export default function LeaderboardPage() {
             By month
           </button>
         </div>
-        {monthly && (
-          <input
-            type="month"
-            value={month}
-            max={thisMonth()}
-            onChange={(e) => setMonth(e.target.value || thisMonth())}
-            className="field rounded-lg px-3 py-1.5 text-sm"
-          />
-        )}
+
+        {monthly && <MonthPicker value={month} onChange={setMonth} />}
       </div>
 
       {error && (

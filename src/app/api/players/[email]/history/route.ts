@@ -33,28 +33,32 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
 
     const { data: events, error: eErr } = await sb
       .from("lr_events")
-      .select("match_id,delta,created_at")
+      .select("match_id,delta,created_at,kind")
       .eq("email", email)
       .order("created_at", { ascending: true });
     if (eErr) throw new Error(eErr.message);
 
-    // Walk chronologically from the immutable starting LR, applying each delta so
-    // every row carries the LR the player held after that match. The final value
-    // equals players.lr (= starting_lr + sum of all deltas), so it stays in sync.
+    // Walk chronologically from the immutable starting LR, applying EVERY delta
+    // (matches, plus season 'reset'/'carry' bookkeeping) so the running total
+    // reconciles with players.lr. Only 'match' rows are treated as games with a
+    // win/loss; 'reset'/'carry' are surfaced as neutral season adjustments.
     let running = player.starting_lr;
-    const matches = (events ?? []).map((ev) => {
+    const entries = (events ?? []).map((ev) => {
       running += ev.delta;
+      const kind = ev.kind ?? "match";
       return {
         matchId: ev.match_id,
         delta: ev.delta,
-        won: ev.delta > 0,
+        kind,
+        won: kind === "match" ? ev.delta > 0 : null,
         lr: running,
         playedAt: ev.created_at,
       };
     });
 
-    const wins = matches.filter((m) => m.won).length;
-    const losses = matches.length - wins;
+    const wins = entries.filter((m) => m.kind === "match" && m.won).length;
+    const losses = entries.filter((m) => m.kind === "match" && m.won === false).length;
+    const matches = entries;
 
     return NextResponse.json({
       player: {

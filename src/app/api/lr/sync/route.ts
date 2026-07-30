@@ -27,6 +27,11 @@ interface SyncBody {
   matches?: MatchInput[];
   /** How many teams are in this bracket — decides the champion bonus. */
   teamCount?: number;
+  /**
+   * Optional LR bet for the whole tournament. When > 0 it replaces the standard
+   * +40/−40/+80 scale: every win pays +stake, every loss −stake.
+   */
+  stake?: number;
 }
 
 function normEmail(e: string | undefined): string {
@@ -73,6 +78,12 @@ export async function POST(request: Request) {
       ? Math.max(0, Math.floor(Number(body.teamCount)))
       : 3;
 
+    // LR bet for the whole tournament: when > 0, every win/loss pays ±stake and
+    // the standard scale (incl. champion bonus) is bypassed. Clamped sane.
+    const stake = Number.isFinite(Number(body.stake))
+      ? Math.max(0, Math.min(100000, Math.round(Number(body.stake))))
+      : 0;
+
     // One event per (match, player); winners gain, losers lose.
     const events: { match_id: string; email: string; delta: number }[] = [];
     for (const m of body.matches ?? []) {
@@ -81,13 +92,13 @@ export async function POST(request: Request) {
       for (const raw of m.winnerEmails ?? []) {
         const email = normEmail(raw);
         if (email) {
-          events.push({ match_id: m.matchId, email, delta: matchDelta(true, champ, teamCount) });
+          events.push({ match_id: m.matchId, email, delta: matchDelta(true, champ, teamCount, stake) });
         }
       }
       for (const raw of m.loserEmails ?? []) {
         const email = normEmail(raw);
         if (email) {
-          events.push({ match_id: m.matchId, email, delta: matchDelta(false, champ, teamCount) });
+          events.push({ match_id: m.matchId, email, delta: matchDelta(false, champ, teamCount, stake) });
         }
       }
     }

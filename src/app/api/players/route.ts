@@ -1,10 +1,35 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabase } from "@/lib/supabase";
 import { startingLr } from "@/lib/lr";
 
 function errorResponse(e: unknown) {
   const message = e instanceof Error ? e.message : "Unknown error";
   return NextResponse.json({ error: message }, { status: 500 });
+}
+
+/**
+ * One page of a month's lr_events. `withKind` selects the `kind` column; when it
+ * is false (the column predates seasons.sql) the caller treats every row as a
+ * match. Two literal selects because the typed client rejects a dynamic string.
+ */
+function selectEvents(
+  sb: SupabaseClient,
+  r: { start: string; end: string; from: number; to: number },
+  withKind: boolean
+) {
+  const t = sb.from("lr_events");
+  return withKind
+    ? t
+        .select("email,delta,kind")
+        .gte("created_at", r.start)
+        .lt("created_at", r.end)
+        .range(r.from, r.to)
+    : t
+        .select("email,delta")
+        .gte("created_at", r.start)
+        .lt("created_at", r.end)
+        .range(r.from, r.to);
 }
 
 interface PlayerInput {
@@ -79,29 +104,50 @@ export async function GET(request: Request) {
     // Page through the month's events. PostgREST caps a response at 1,000 rows
     // by default and does NOT report truncation, so a single query silently
     // under-counts every total once a month exceeds that many events.
+    // The `kind` column only exists once seasons.sql has been run. Select it,
+    // but fall back to a kind-less query so the leaderboard keeps working before
+    // that migration lands (every existing row is a 'match' in that case).
     const PAGE = 1000;
-    const events: { email: string; delta: number }[] = [];
+    const events: { email: string; delta: number; kind?: string | null }[] = [];
+
+    // Probe once whether `kind` exists, so the paging loop below never has to
+    // retry mid-stream (an in-loop retry previously skipped a page and silently
+    // undercounted every total). A failed probe on the missing column just means
+    // pre-seasons data: every row is a match.
+    let hasKind = true;
+    {
+      const probe = await selectEvents(sb, { start, end, from: 0, to: 0 }, true);
+      if (probe.error) {
+        if (/kind/.test(probe.error.message)) hasKind = false;
+        else throw new Error(probe.error.message);
+      }
+    }
+
     for (let from = 0; ; from += PAGE) {
-      const { data, error: eErr } = await sb
-        .from("lr_events")
-        .select("email,delta")
-        .gte("created_at", start)
-        .lt("created_at", end)
-        .range(from, from + PAGE - 1);
-      if (eErr) throw new Error(eErr.message);
-      const page = data ?? [];
+      const range = { start, end, from, to: from + PAGE - 1 };
+      const res = await selectEvents(sb, range, hasKind);
+      if (res.error) throw new Error(res.error.message);
+      const page = (res.data ?? []) as { email: string; delta: number; kind?: string | null }[];
       events.push(...page);
       if (page.length < PAGE) break;
     }
 
-    // Per player: net LR earned plus win/loss tallies. A positive delta is a win
-    // (+40, or +60 for the champion match); a negative delta is a loss.
+    // Per player: net LR earned plus win/loss tallies. Event kinds:
+    //   'match' — a real game: counts toward earned AND win/loss (by delta sign).
+    //   'carry' — a season head start: counts toward earned only, never a win.
+    //   'reset' — a season-close adjustment: IGNORED here, so viewing a past
+    //             month still shows that month's true match earnings. This is
+    //             what keeps July (and every prior month) intact for history.
     const stats = new Map<string, { earned: number; wins: number; losses: number }>();
     for (const ev of events ?? []) {
+      const kind = ev.kind ?? "match";
+      if (kind === "reset") continue;
       const s = stats.get(ev.email) ?? { earned: 0, wins: 0, losses: 0 };
       s.earned += ev.delta;
-      if (ev.delta > 0) s.wins++;
-      else if (ev.delta < 0) s.losses++;
+      if (kind === "match") {
+        if (ev.delta > 0) s.wins++;
+        else if (ev.delta < 0) s.losses++;
+      }
       stats.set(ev.email, s);
     }
 

@@ -12,7 +12,16 @@
 // This module is pure: no React, no network. The UI holds a DraftState and calls
 // these functions, which makes the whole flow trivially testable.
 
-import type { Player, Team } from "./types";
+import type { Player, Role, Team } from "./types";
+
+/** The five core lanes a proper Dota team fills. */
+const CORE_ROLES: Role[] = [1, 2, 3, 4, 5];
+
+/** Lanes the team on the clock still lacks — drives the soft role bias + UI. */
+export function neededRoles(team: { players: Player[] }): Set<Role> {
+  const have = new Set(team.players.map((p) => p.role).filter((r): r is Role => r != null));
+  return new Set(CORE_ROLES.filter((r) => !have.has(r)));
+}
 
 /** How many face-down cards are offered on each turn. */
 export const OFFER_SIZE = 5;
@@ -30,6 +39,11 @@ export interface DraftState {
   history: { teamId: number; player: Player; round: number }[];
   /** How many players each team must end up with (captain included). */
   teamSize: number;
+  /**
+   * Ranks players (current LR or raw MMR). Kept on the state so every offer
+   * drawn mid-draft uses the same basis the draft started with.
+   */
+  weight: (p: Player) => number;
 }
 
 /** Fisher–Yates shuffle (returns a new array). */
@@ -42,9 +56,56 @@ function shuffled<T>(items: T[]): T[] {
   return arr;
 }
 
-/** Draw the next face-down offer: up to OFFER_SIZE random players from the pool. */
-export function drawOffer(pool: Player[]): Player[] {
-  return shuffled(pool).slice(0, Math.min(OFFER_SIZE, pool.length));
+/**
+ * Draw the next offer: OFFER_SIZE players of SIMILAR strength, with a SOFT lean
+ * toward roles the picking team still needs.
+ *
+ * Strength: sort the pool by rating and take a random contiguous window of
+ * adjacent players, so the cards are close in strength and the decision is about
+ * role/fit rather than "take the biggest number". The window position is random,
+ * so the offer stays unpredictable.
+ *
+ * Role lean (soft): `neededRoles` are the lanes the team lacks. We nudge the
+ * window toward including some, but never force it — the window is still chosen
+ * among a few random candidates, just weighted so ones covering a needed role
+ * are more likely. Passing an empty/omitted set falls back to pure strength.
+ */
+export function drawOffer(
+  pool: Player[],
+  weight: (p: Player) => number,
+  neededRoles?: Set<Role>
+): Player[] {
+  const size = Math.min(OFFER_SIZE, pool.length);
+  if (size === 0) return [];
+  if (pool.length <= OFFER_SIZE) return shuffled(pool);
+
+  const ranked = [...pool].sort((a, b) => weight(b) - weight(a));
+  const lastStart = ranked.length - size;
+
+  // Without a role need, keep the original single random window.
+  if (!neededRoles || neededRoles.size === 0) {
+    const start = Math.floor(Math.random() * (lastStart + 1));
+    return shuffled(ranked.slice(start, start + size));
+  }
+
+  // Soft lean: sample a few random windows, keep the one whose coverage-weighted
+  // random score is highest (+1 so a zero-cover window can still win sometimes).
+  const TRIES = 4;
+  let best = ranked.slice(0, size);
+  let bestWeight = -1;
+  for (let i = 0; i < TRIES; i++) {
+    const start = Math.floor(Math.random() * (lastStart + 1));
+    const win = ranked.slice(start, start + size);
+    const covered = new Set(
+      win.map((p) => p.role).filter((r): r is Role => r != null && neededRoles.has(r))
+    );
+    const w = (covered.size + 1) * Math.random();
+    if (w > bestWeight) {
+      best = win;
+      bestWeight = w;
+    }
+  }
+  return shuffled(best);
 }
 
 /**
@@ -77,14 +138,24 @@ export function startDraft(
   const rest = ranked.slice(numTeams);
   const teamSize = numTeams > 0 ? Math.floor(players.length / numTeams) : 0;
 
-  return {
-    teams: captains.map((captain, i) => ({ id: i + 1, captain, players: [captain] })),
+  // Balance captain strength across teams: the snake already advantages the
+  // team that picks first, so seating the STRONGEST captain there would stack
+  // that team. Assign captains to teams in random order instead, so captain
+  // strength and pick-order advantage aren't correlated.
+  const seats = shuffled(captains);
+
+  const state: DraftState = {
+    teams: seats.map((captain, i) => ({ id: i + 1, captain, players: [captain] })),
     pool: rest,
-    offer: drawOffer(rest),
+    offer: [],
     turn: 0,
     history: [],
     teamSize,
+    weight,
   };
+  // Draw the opening offer for the team on the clock, leaning to its needs.
+  state.offer = drawOffer(rest, weight, neededRoles(state.teams[state.turn]));
+  return state;
 }
 
 /** True once every team has been filled to `teamSize`. */
@@ -115,7 +186,8 @@ export function pick(s: DraftState, playerId: string): DraftState {
   // Advance the snake past any team that is already full.
   const next = { ...s, teams, pool, history };
   const turn = nextTurn(next);
-  return { ...next, turn, offer: drawOffer(pool) };
+  const need = next.teams[turn] ? neededRoles(next.teams[turn]) : undefined;
+  return { ...next, turn, offer: drawOffer(pool, s.weight, need) };
 }
 
 /**
@@ -145,7 +217,9 @@ export function undo(s: DraftState): DraftState {
   const pool = [...s.pool, last.player];
   const history = s.history.slice(0, -1);
   const rewound = { ...s, teams, pool, history };
-  return { ...rewound, turn: nextTurn(rewound), offer: drawOffer(pool) };
+  const turn = nextTurn(rewound);
+  const need = rewound.teams[turn] ? neededRoles(rewound.teams[turn]) : undefined;
+  return { ...rewound, turn, offer: drawOffer(pool, s.weight, need) };
 }
 
 /** Convert a finished (or partial) draft into the Team shape the app uses. */

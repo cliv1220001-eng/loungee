@@ -14,6 +14,89 @@ export interface BalanceResult {
   spread: number;
 }
 
+/**
+ * Tuning for how much the balancer trades exactness for variety.
+ *   tolerance  — fraction above the best spread still treated as "good enough";
+ *                any result within [best, best*(1+tolerance)] is a candidate, so
+ *                near-equal partitions all become eligible instead of only the
+ *                single tightest one (which is nearly unique and made the same
+ *                teams appear every reshuffle).
+ *   repeatPenalty — spread-equivalent cost charged per recently-teamed pair a
+ *                result recreates, so reshuffles actively break up prior duos.
+ */
+export interface BalanceOptions {
+  tolerance?: number;
+  repeatPenalty?: number;
+  /**
+   * Pairs teamed on a previous generation, each as "idA|idB" with idA < idB.
+   * Results that re-pair these are penalized so rosters churn between shuffles.
+   */
+  recentPairs?: Set<string>;
+}
+
+const DEFAULT_TOLERANCE = 0.03; // 3%
+const DEFAULT_REPEAT_PENALTY = 200; // MMR-equivalent cost per repeated pair
+
+/** Canonical key for an unordered pair of player ids. */
+export function pairKey(a: string, b: string): string {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+/** Every within-team pair in a result, as canonical "idA|idB" keys. */
+export function pairsOf(teams: Team[]): Set<string> {
+  const pairs = new Set<string>();
+  for (const t of teams) {
+    for (let i = 0; i < t.players.length; i++) {
+      for (let j = i + 1; j < t.players.length; j++) {
+        pairs.add(pairKey(t.players[i].id, t.players[j].id));
+      }
+    }
+  }
+  return pairs;
+}
+
+/** How many of `recent` this result reproduces — the anti-repeat cost driver. */
+function repeatedPairs(teams: Team[], recent: Set<string> | undefined): number {
+  if (!recent || recent.size === 0) return 0;
+  let n = 0;
+  for (const key of pairsOf(teams)) if (recent.has(key)) n++;
+  return n;
+}
+
+/**
+ * Pick among near-optimal results for variety. `cost(r)` is a result's spread
+ * plus its repeat penalty; every result within `tolerance` of the best cost is a
+ * candidate, and one is chosen at random. This is what turns "same teams every
+ * time" into a genuinely different-but-still-fair split each reshuffle.
+ */
+function chooseVaried(
+  results: BalanceResult[],
+  opts: BalanceOptions | undefined,
+  extraCost: (r: BalanceResult) => number
+): BalanceResult {
+  const tolerance = opts?.tolerance ?? DEFAULT_TOLERANCE;
+  const cost = (r: BalanceResult) => r.spread + extraCost(r);
+  const best = Math.min(...results.map(cost));
+  // Allow an absolute floor too, so a best cost of 0 still admits near-ties.
+  const ceiling = best * (1 + tolerance) + 1e-9;
+  const candidates = results.filter((r) => cost(r) <= ceiling);
+  const pool = candidates.length > 0 ? candidates : results;
+
+  // Dedupe by team composition so the random pick chooses among GENUINELY
+  // distinct arrangements — otherwise many identical partitions in the pool bias
+  // selection toward whichever the restarts happened to find most often.
+  const bySig = new Map<string, BalanceResult>();
+  for (const r of pool) {
+    const sig = r.teams
+      .map((t) => t.players.map((p) => p.id).sort().join(","))
+      .sort()
+      .join("|");
+    if (!bySig.has(sig)) bySig.set(sig, r);
+  }
+  const distinct = [...bySig.values()];
+  return distinct[Math.floor(Math.random() * distinct.length)];
+}
+
 interface WorkingTeam {
   id: number;
   players: Player[];
@@ -183,7 +266,12 @@ function toResult(teams: WorkingTeam[]): BalanceResult {
  * Runs several randomized greedy+refine restarts, then randomly picks among the
  * tied-best results so repeated calls stay balanced but vary the rosters.
  */
-export function balanceTeams(players: Player[], numTeams: number, restarts = 80): BalanceResult {
+export function balanceTeams(
+  players: Player[],
+  numTeams: number,
+  restarts = 200,
+  opts?: BalanceOptions
+): BalanceResult {
   if (numTeams < 1) throw new Error("numTeams must be at least 1");
   if (players.length === 0) {
     return { teams: teamCapacities(0, numTeams).map((_, i) => ({ id: i + 1, players: [], totalMmr: 0 })), spread: 0 };
@@ -196,9 +284,10 @@ export function balanceTeams(players: Player[], numTeams: number, restarts = 80)
     results.push(toResult(teams));
   }
 
-  const bestSpread = Math.min(...results.map((r) => r.spread));
-  const tiedBest = results.filter((r) => r.spread === bestSpread);
-  return tiedBest[Math.floor(Math.random() * tiedBest.length)];
+  // Pick among near-optimal splits (within tolerance), preferring ones that
+  // recreate the fewest recent pairings — so reshuffles vary AND break up duos.
+  const penalty = opts?.repeatPenalty ?? DEFAULT_REPEAT_PENALTY;
+  return chooseVaried(results, opts, (r) => penalty * repeatedPairs(r.teams, opts?.recentPairs));
 }
 
 /** Fisher–Yates shuffle (returns a new array). */
@@ -285,7 +374,12 @@ function neediestTeams(teams: WorkingTeam[]): WorkingTeam[] {
  * proper. A final pass swaps same-role players to tighten MMR without disturbing
  * the role layout.
  */
-export function balanceByRole(players: Player[], numTeams: number, restarts = 80): BalanceResult {
+export function balanceByRole(
+  players: Player[],
+  numTeams: number,
+  restarts = 200,
+  opts?: BalanceOptions
+): BalanceResult {
   if (numTeams < 1) throw new Error("numTeams must be at least 1");
   if (players.length === 0) {
     return {
@@ -294,25 +388,22 @@ export function balanceByRole(players: Player[], numTeams: number, restarts = 80
     };
   }
 
-  // Randomized restarts: each build varies via random tie-breaks (see
-  // neediestTeams). Keep the layout with the fewest missing lanes overall
-  // (role-completeness is this mode's whole point), breaking ties by tightest
-  // spread — never trading proper roles for a marginally closer total.
-  let best: WorkingTeam[] | null = null;
-  let bestMissing = Infinity;
-  let bestSpread = Infinity;
-  for (let r = 0; r < restarts; r++) {
+  // Role-completeness is this mode's whole point, so it's the hard filter: only
+  // among the layouts with the FEWEST missing lanes do we then pick for variety
+  // (tolerance on spread + anti-repeat), instead of always the single tightest.
+  const builds = Array.from({ length: restarts }, () => {
     const teams = buildRoleTeams(players, numTeams);
     refineSameRole(teams);
-    const missing = teams.reduce((n, t) => n + missingCoreRoles(t), 0);
-    const spread = spreadOf(teams);
-    if (missing < bestMissing || (missing === bestMissing && spread < bestSpread)) {
-      best = teams;
-      bestMissing = missing;
-      bestSpread = spread;
-    }
-  }
-  return toResult(best!);
+    return teams;
+  });
+
+  const missingOf = (t: WorkingTeam[]) => t.reduce((n, x) => n + missingCoreRoles(x), 0);
+  const fewestMissing = Math.min(...builds.map(missingOf));
+  const proper = builds.filter((t) => missingOf(t) === fewestMissing);
+
+  const results = proper.map(toResult);
+  const penalty = opts?.repeatPenalty ?? DEFAULT_REPEAT_PENALTY;
+  return chooseVaried(results, opts, (r) => penalty * repeatedPairs(r.teams, opts?.recentPairs));
 }
 
 /** One randomized role-first build (no refine). See balanceByRole for the strategy. */
@@ -416,16 +507,17 @@ function refineSameRole(teams: WorkingTeam[]): void {
 export function generateTeams(
   players: Player[],
   numTeams: number,
-  mode: BalanceMode
+  mode: BalanceMode,
+  opts?: BalanceOptions
 ): BalanceResult {
   const pool = applyForcedGroups(players);
   switch (mode) {
     case "role":
-      return balanceByRole(pool, numTeams);
+      return balanceByRole(pool, numTeams, 200, opts);
     case "random":
       return randomTeams(pool, numTeams);
     case "mmr":
     default:
-      return balanceTeams(pool, numTeams);
+      return balanceTeams(pool, numTeams, 200, opts);
   }
 }

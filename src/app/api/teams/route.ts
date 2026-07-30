@@ -23,6 +23,11 @@ interface TeamsBody {
   numTeams?: number;
   mode?: BalanceMode;
   basis?: BalanceBasis;
+  /**
+   * Canonical "idA|idB" pairs teamed on the PREVIOUS generation. The balancer
+   * penalizes recreating them so reshuffles break up prior duos.
+   */
+  recentPairs?: string[];
 }
 
 function normalize(p: PlayerInput, i: number): Player {
@@ -45,6 +50,11 @@ export async function POST(request: Request) {
     // Default to LR — the ladder rating is the app's primary measure of strength.
     const basis: BalanceBasis = body.basis === "mmr" ? "mmr" : "lr";
     const players = (body.players ?? []).map(normalize).filter((p) => p.name !== "");
+
+    // Anti-repeat: pairs teamed last generation, so reshuffles churn rosters.
+    const balanceOpts = {
+      recentPairs: new Set((body.recentPairs ?? []).filter((k) => typeof k === "string")),
+    };
 
     if (players.length === 0) {
       return NextResponse.json({ teams: [], spread: 0 } satisfies BalanceResult);
@@ -89,7 +99,7 @@ export async function POST(request: Request) {
         basis === "lr"
           ? players.map((p) => ({ ...p, mmr: Math.round(currentLr(p)) }))
           : players;
-      const out = generateTeams(weighted, numTeams, mode);
+      const out = generateTeams(weighted, numTeams, mode, balanceOpts);
       const byId = new Map(players.map((p) => [p.id, p]));
       res = {
         spread: out.spread,
@@ -102,7 +112,7 @@ export async function POST(request: Request) {
         }),
       };
     } else {
-      res = generateTeams(players, numTeams, mode);
+      res = generateTeams(players, numTeams, mode, balanceOpts);
     }
 
     // Return the exact Team shape the bracket/LR expect — real player fields only,

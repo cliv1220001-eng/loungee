@@ -16,24 +16,30 @@ export interface BracketRun {
   seed: number;
   /** matchId -> winning side. */
   winners: Record<string, "a" | "b">;
+  /**
+   * Optional LR bet for this tournament. When > 0, every match win/loss pays
+   * ±stake instead of the standard +40/−40/+80 scale.
+   */
+  stake?: number;
 }
 
 /** Deterministic default (no id yet) so SSR/hydration match; a real run is
  *  minted client-side by startBracketRun() or lazily on the bracket page. */
-export const EMPTY_BRACKET_RUN: BracketRun = { runId: "", format: "single", seed: 0, winners: {} };
+export const EMPTY_BRACKET_RUN: BracketRun = { runId: "", format: "single", seed: 0, winners: {}, stake: 0 };
 
 /**
  * Mint a fresh bracket run (called when new teams are sent to the bracket).
  * Pass the tournament id so its LR/match history is grouped under that
- * tournament; without one a random id is used.
+ * tournament; without one a random id is used. `stake` carries the LR bet.
  */
-export function startBracketRun(runId?: string): void {
+export function startBracketRun(runId?: string, stake = 0): void {
   try {
     const run: BracketRun = {
       runId: runId && runId.trim() !== "" ? runId : crypto.randomUUID(),
       format: "single",
       seed: Math.floor(Math.random() * 2 ** 31),
       winners: {},
+      stake: stake > 0 ? stake : 0,
     };
     localStorage.setItem(BRACKET_RUN_KEY, JSON.stringify(run));
   } catch {

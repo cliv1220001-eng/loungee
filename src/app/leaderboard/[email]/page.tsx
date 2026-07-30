@@ -8,7 +8,10 @@ import { ROLE_LABELS, type Role } from "@/lib/types";
 interface HistoryMatch {
   matchId: string;
   delta: number;
-  won: boolean;
+  /** 'match' = real game; 'reset'/'carry' = season bookkeeping. */
+  kind: "match" | "reset" | "carry";
+  /** true/false for matches; null for season adjustments. */
+  won: boolean | null;
   lr: number;
   playedAt: string;
 }
@@ -178,17 +181,29 @@ export default function PlayerHistoryPage({
                       <td className="px-4 py-3">
                         <span
                           className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                            m.won
-                              ? "bg-emerald-400/10 text-emerald-400"
-                              : "bg-red-400/10 text-red-400"
+                            m.kind !== "match"
+                              ? "bg-white/5 text-zinc-400"
+                              : m.won
+                                ? "bg-emerald-400/10 text-emerald-400"
+                                : "bg-red-400/10 text-red-400"
                           }`}
                         >
-                          {m.won ? "Win" : "Loss"}
+                          {m.kind === "carry"
+                            ? "Season carry"
+                            : m.kind === "reset"
+                              ? "Season reset"
+                              : m.won
+                                ? "Win"
+                                : "Loss"}
                         </span>
                       </td>
                       <td
                         className={`px-4 py-3 text-right font-bold tabular-nums ${
-                          m.delta > 0 ? "text-emerald-400" : "text-red-400"
+                          m.delta > 0
+                            ? "text-emerald-400"
+                            : m.delta < 0
+                              ? "text-red-400"
+                              : "text-zinc-400"
                         }`}
                       >
                         {signed(m.delta)}

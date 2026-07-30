@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import type { BalanceBasis, BalanceMode, BalanceResult } from "@/lib/balance";
+import { pairsOf, type BalanceBasis, type BalanceMode, type BalanceResult } from "@/lib/balance";
 import {
   OFFER_SIZE,
   isComplete as draftComplete,
+  neededRoles,
   pick as draftPick,
   startDraft,
   toTeams as draftToTeams,
@@ -60,7 +61,7 @@ const MODES: { key: PageMode; label: string; hint: string }[] = [
   { key: "mmr", label: "Balance", hint: "Closest team totals" },
   { key: "role", label: "Spread Roles", hint: "Even roles + balanced" },
   { key: "random", label: "Random", hint: "Shuffle without weighting" },
-  { key: "draft", label: "Captain's Draft", hint: "Captains pick blind" },
+  { key: "draft", label: "Captain's Draft", hint: "Captains pick, snake order" },
 ];
 
 /** The measure of strength the balancer weights by (ignored by Random). */
@@ -111,6 +112,11 @@ interface BalancerSession {
   generated?: BalanceResult | null;
   /** The basis the current result was generated with, so totals stay truthful. */
   resultBasis?: BalanceBasis;
+  /**
+   * LR bet for this tournament. 0 = normal +40/−40/+80 scoring; > 0 means every
+   * match win/loss pays ±stake instead. Carried into the bracket run.
+   */
+  stake?: number;
 }
 
 const SESSION_KEY = "dota-balancer:session";
@@ -210,6 +216,9 @@ export default function Balancer() {
     setSession((s) => ({ ...s, rows: typeof updater === "function" ? updater(s.rows) : updater }));
   const setMode = (next: PageMode) => setSession((s) => ({ ...s, mode: next }));
   const setBasis = (next: BalanceBasis) => setSession((s) => ({ ...s, basis: next }));
+  const stake = session.stake ?? 0;
+  const setStake = (next: number) =>
+    setSession((s) => ({ ...s, stake: Number.isFinite(next) && next > 0 ? Math.round(next) : 0 }));
   const setResult = (next: BalanceResult | null) => setSession((s) => ({ ...s, result: next }));
 
   // Transient UI state (not persisted).
@@ -605,6 +614,10 @@ export default function Balancer() {
       email: (r.email ?? "").trim().toLowerCase() || null,
     }));
 
+    // Pairs from the teams currently on screen — sent so the next generation
+    // actively avoids re-teaming the same duos (breaks up "always together").
+    const recentPairs = result ? [...pairsOf(result.teams)] : [];
+
     setShuffling(true);
     setRevealed(false); // keep the new teams hidden until the user reveals them
     setGenError(null);
@@ -620,6 +633,7 @@ export default function Balancer() {
           numTeams,
           mode: mode === "draft" ? "mmr" : mode,
           basis,
+          recentPairs,
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -639,8 +653,9 @@ export default function Balancer() {
   function sendToBracket() {
     if (!result) return;
     saveTeams(result.teams);
-    // Group this bracket's LR/match history under the tournament id.
-    startBracketRun(current.id ?? undefined);
+    // Group this bracket's LR/match history under the tournament id, carrying
+    // the LR bet stake so every match pays ±stake instead of the normal scale.
+    startBracketRun(current.id ?? undefined, stake);
     registerPlayers(registryFromTeams(result.teams));
     router.push("/bracket");
   }
@@ -881,11 +896,8 @@ export default function Balancer() {
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-10 px-6 py-12">
       <header className="flex flex-col gap-3 text-center sm:text-left">
         <h1 className="gradient-text text-4xl font-extrabold tracking-tight sm:text-5xl">
-          Build Balanced Teams
+          Loungee Tournament Organizer
         </h1>
-        <p className="max-w-xl text-zinc-400">
-          Loungee Tournament Organizer.
-        </p>
       </header>
 
       {/* Active tournament */}
@@ -997,6 +1009,44 @@ export default function Balancer() {
               : mode === "draft"
                 ? `Captains are the top ${basis === "lr" ? "LR" : "MMR"} players; cards show ${basis === "lr" ? "LR" : "MMR"}.`
                 : BASES.find((b) => b.key === basis)?.hint}
+          </span>
+        </div>
+
+        {/* LR bet — one stake for the whole tournament. When set, every match
+            win/loss pays ±stake instead of the normal +40/−40/+80 scale. */}
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            LR bet
+          </span>
+          <div className="relative flex items-center">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={stake > 0 ? String(stake) : ""}
+              onChange={(e) => setStake(Number(e.target.value.replace(/[^0-9]/g, "").slice(0, 6)))}
+              placeholder="Off"
+              className="field w-28 rounded-lg py-1.5 pl-3 pr-9 text-sm tabular-nums"
+            />
+            <span className="pointer-events-none absolute right-3 text-xs text-zinc-500">LR</span>
+          </div>
+          {stake > 0 && (
+            <button
+              onClick={() => setStake(0)}
+              className="text-xs font-semibold text-zinc-400 transition-colors hover:text-white"
+            >
+              Clear
+            </button>
+          )}
+          <span className="text-xs text-zinc-500">
+            {stake > 0 ? (
+              <>
+                Every match: winners{" "}
+                <span className="font-semibold text-emerald-400">+{stake}</span>, losers{" "}
+                <span className="font-semibold text-red-400">−{stake}</span> LR.
+              </>
+            ) : (
+              "Leave blank for standard +40 / −40 / +80 scoring."
+            )}
           </span>
         </div>
       </div>
@@ -1271,7 +1321,12 @@ export default function Balancer() {
       )}
 
       {/* Captain's Draft board */}
-      {draft && (
+      {draft && (() => {
+        // Lanes the team on the clock still lacks — highlights matching cards.
+        const onClockNeeds = draftComplete(draft)
+          ? []
+          : [...neededRoles(draft.teams[draft.turn])];
+        return (
         <section className="flex flex-col gap-5">
           {/* Status bar: who's on the clock, progress, controls */}
           <div className="panel flex flex-wrap items-center gap-3 rounded-2xl p-4">
@@ -1336,33 +1391,64 @@ export default function Balancer() {
           {/* Face-down offer */}
           {!draftComplete(draft) && (
             <div className="flex flex-col gap-3">
-              <p className="text-sm text-zinc-400">
-                Pick one of {Math.min(OFFER_SIZE, draft.pool.length)} — names are hidden until
-                chosen. Showing role and {unit}.
+              <p className="flex flex-wrap items-center gap-x-2 text-sm text-zinc-400">
+                <span>
+                  Pick one of {Math.min(OFFER_SIZE, draft.pool.length)} for{" "}
+                  <span
+                    className="font-semibold"
+                    style={{ color: TEAM_ACCENTS[draft.turn % TEAM_ACCENTS.length] }}
+                  >
+                    Team {draft.teams[draft.turn]?.id}
+                  </span>
+                  .
+                </span>
+                {onClockNeeds.length > 0 && (
+                  <span className="flex items-center gap-1">
+                    <span className="text-zinc-500">Needs:</span>
+                    {onClockNeeds.map((r) => (
+                      <span
+                        key={r}
+                        className="rounded-full bg-amber-400/10 px-2 py-0.5 text-[11px] font-semibold text-amber-300"
+                      >
+                        {ROLE_LABELS[r]}
+                      </span>
+                    ))}
+                  </span>
+                )}
               </p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-                {draft.offer.map((p, i) => (
-                  <button
-                    key={p.id}
-                    onClick={() => takePick(p.id)}
-                    disabled={reveal !== null}
-                    className="panel animate-pop group flex flex-col items-center gap-2 rounded-xl p-4 text-center transition-all hover:-translate-y-0.5 hover:ring-1 hover:ring-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
-                    style={{ animationDelay: `${i * 50}ms` }}
-                  >
-                    <span className="text-3xl opacity-30 transition-opacity group-hover:opacity-60">
-                      ?
-                    </span>
-                    <span className="text-xl font-extrabold tabular-nums text-zinc-100">
-                      {weightOf(p)}
-                    </span>
-                    <span className="text-[11px] uppercase tracking-wider text-zinc-500">
-                      {unit}
-                    </span>
-                    <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] font-semibold text-zinc-300">
-                      {p.role ? ROLE_LABELS[p.role] : "Any role"}
-                    </span>
-                  </button>
-                ))}
+                {draft.offer.map((p, i) => {
+                  const fillsNeed = p.role != null && onClockNeeds.includes(p.role);
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => takePick(p.id)}
+                      disabled={reveal !== null}
+                      className={`panel animate-pop group flex flex-col items-center gap-1.5 rounded-xl p-4 text-center transition-all hover:-translate-y-0.5 hover:ring-1 hover:ring-[var(--accent)] disabled:pointer-events-none disabled:opacity-50 ${
+                        fillsNeed ? "ring-1 ring-amber-400/40" : ""
+                      }`}
+                      style={{ animationDelay: `${i * 50}ms` }}
+                    >
+                      <span className="truncate text-base font-bold text-zinc-100">{p.name}</span>
+                      <span className="text-2xl font-extrabold tabular-nums text-[var(--lg-glow)]">
+                        {weightOf(p)}
+                        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                          {unit}
+                        </span>
+                      </span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                          fillsNeed
+                            ? "bg-amber-400/15 text-amber-300"
+                            : "bg-white/5 text-zinc-300"
+                        }`}
+                      >
+                        {p.role ? ROLE_LABELS[p.role] : "Any role"}
+                        {fillsNeed && " ✓"}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1373,6 +1459,7 @@ export default function Balancer() {
               const accent = TEAM_ACCENTS[i % TEAM_ACCENTS.length];
               const onClock = !draftComplete(draft) && draft.turn === i;
               const total = t.players.reduce((s, p) => s + weightOf(p), 0);
+              const needs = [...neededRoles(t)];
               return (
                 <div
                   key={t.id}
@@ -1381,13 +1468,31 @@ export default function Balancer() {
                   }`}
                   style={{ borderColor: accent }}
                 >
-                  <div className="mb-2.5 flex items-baseline justify-between gap-1">
+                  <div className="mb-2 flex items-baseline justify-between gap-1">
                     <h2 className="text-base font-extrabold" style={{ color: accent }}>
                       Team {t.id}
                     </h2>
                     <span className="text-[11px] font-bold tabular-nums text-zinc-200">
                       {total} {unit}
                     </span>
+                  </div>
+                  {/* Missing lanes — helps decide who this team should draft. */}
+                  <div className="mb-2 flex flex-wrap gap-1">
+                    {needs.length === 0 ? (
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400/80">
+                        Roles complete
+                      </span>
+                    ) : (
+                      needs.map((r) => (
+                        <span
+                          key={r}
+                          title={`Needs ${ROLE_LABELS[r]}`}
+                          className="rounded bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300"
+                        >
+                          {ROLE_LABELS[r]}
+                        </span>
+                      ))
+                    )}
                   </div>
                   <ul className="flex flex-col gap-1.5">
                     {t.players.map((p) => (
@@ -1433,7 +1538,8 @@ export default function Balancer() {
             })}
           </div>
         </section>
-      )}
+        );
+      })()}
 
       {/* Teams ready but hidden — reveal on demand */}
       {result && !revealed && (

@@ -201,13 +201,19 @@ export default function BracketView() {
     fetch("/api/lr/sync", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ runId: run.runId, players, matches, teamCount: teams.length }),
+      body: JSON.stringify({
+        runId: run.runId,
+        players,
+        matches,
+        teamCount: teams.length,
+        stake: run.stake ?? 0,
+      }),
       signal: ctrl.signal,
     })
       .then(() => refreshLr()) // pull the recomputed LR back so the bracket updates
       .catch(() => {});
     return () => ctrl.abort();
-  }, [run.runId, resolved, bracket, teams, teamsById, refreshLr]);
+  }, [run.runId, run.stake, resolved, bracket, teams, teamsById, refreshLr]);
 
   if (teams === undefined) {
     return <Shell><p className="text-zinc-500">Loading bracket…</p></Shell>;
@@ -468,6 +474,15 @@ export default function BracketView() {
         </button>
 
         <span className="text-sm text-zinc-500">{teams.length} teams</span>
+
+        {(run.stake ?? 0) > 0 && (
+          <span
+            title="LR bet — every match win/loss pays this instead of the normal scale"
+            className="rounded-full bg-[var(--accent)]/15 px-3 py-1 text-sm font-bold text-[var(--lg-glow)]"
+          >
+            LR bet ±{run.stake}
+          </span>
+        )}
 
         <Link
           href="/"
