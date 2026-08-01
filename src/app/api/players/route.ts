@@ -98,8 +98,13 @@ export async function GET(request: Request) {
     if (mon < 1 || mon > 12) {
       return NextResponse.json({ error: "month must be YYYY-MM." }, { status: 400 });
     }
-    const start = new Date(Date.UTC(year, mon - 1, 1)).toISOString();
-    const end = new Date(Date.UTC(year, mon, 1)).toISOString();
+    // Window months in Philippine time (UTC+8) — the league plays late-night PH,
+    // so a game at 2am Aug 1 PH is 6pm Jul 31 UTC. Slicing by UTC would file it
+    // under July; slicing by PH keeps it in the month it was actually played.
+    // PH midnight on day 1 = UTC 16:00 the previous day, i.e. subtract 8 hours.
+    const PH_OFFSET_MS = 8 * 60 * 60 * 1000;
+    const start = new Date(Date.UTC(year, mon - 1, 1) - PH_OFFSET_MS).toISOString();
+    const end = new Date(Date.UTC(year, mon, 1) - PH_OFFSET_MS).toISOString();
 
     // Page through the month's events. PostgREST caps a response at 1,000 rows
     // by default and does NOT report truncation, so a single query silently

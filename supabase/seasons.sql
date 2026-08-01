@@ -52,7 +52,10 @@ language plpgsql as $$
 declare
   v_year  int := p_yyyymm / 100;
   v_month int := p_yyyymm % 100;
-  v_start timestamptz := make_timestamptz(v_year, v_month, 1, 0, 0, 0, 'UTC');
+  -- Month boundaries in PHILIPPINE time (the league plays late-night PH, so a
+  -- 2am-Aug-1 PH game is 6pm-Jul-31 UTC — it must count as August, not July).
+  -- make_timestamptz interprets the wall-clock fields in the named zone.
+  v_start timestamptz := make_timestamptz(v_year, v_month, 1, 0, 0, 0, 'Asia/Manila');
   v_end   timestamptz := (v_start + interval '1 month');
   v_reset_at timestamptz := v_end - interval '1 second';
 begin

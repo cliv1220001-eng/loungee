@@ -59,7 +59,8 @@
       "Bash(cp src/app/balancer.tsx /tmp/mine.tsx)",
       "Bash(cp /tmp/head-bal.tsx src/app/balancer.tsx)",
       "Bash(echo \"LINT=$?\")",
-      "Bash(rm -f __TRACKED_VAR__/season-sim.mjs __TRACKED_VAR__/eu.mjs)"
+      "Bash(rm -f __TRACKED_VAR__/season-sim.mjs __TRACKED_VAR__/eu.mjs)",
+      "Bash(grep -n \"^-- 3\\\\. Close\\\\|^drop function\\\\|^create or replace function close_month\\\\|^end \\\\$\\\\$;\" supabase/seasons.sql)"
     ],
     "additionalDirectories": [
       "\\tmp"
