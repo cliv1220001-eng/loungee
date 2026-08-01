@@ -53,6 +53,22 @@ function signed(n: number): string {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+/**
+ * Podium treatment for the top ranks (1-based). Top 3 get a medal emoji +
+ * colored highlight; 4 and 5 get a subtler accent (no medal) so the whole Top 5
+ * reads as elite without overselling 4th/5th as medalists.
+ */
+const PODIUM: Record<
+  number,
+  { emoji?: string; color: string; glow?: string }
+> = {
+  1: { emoji: "🥇", color: "#e0b64a", glow: "rgba(224,182,74,0.14)" },
+  2: { emoji: "🥈", color: "#c8ccd4", glow: "rgba(200,204,212,0.12)" },
+  3: { emoji: "🥉", color: "#c08457", glow: "rgba(192,132,87,0.12)" },
+  4: { color: "#8a93a3", glow: "rgba(138,147,163,0.06)" },
+  5: { color: "#8a93a3", glow: "rgba(138,147,163,0.06)" },
+};
+
 const MONTH_ABBR = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -255,16 +271,32 @@ export default function LeaderboardPage() {
                 const wins = p.wins ?? 0;
                 const losses = p.losses ?? 0;
                 const rate = winRate(wins, losses);
+                const podium = PODIUM[i + 1];
                 return (
                   <tr
                     key={p.email}
                     className="border-b border-[var(--panel-border)] last:border-0 transition-colors hover:bg-white/[0.02]"
+                    style={podium?.glow ? { backgroundColor: podium.glow } : undefined}
                   >
-                    <td className="px-3 py-3 tabular-nums text-zinc-500">{i + 1}</td>
+                    <td className="px-3 py-3 tabular-nums text-zinc-500">
+                      {podium ? (
+                        <span className="flex items-center gap-1.5">
+                          {podium.emoji && (
+                            <span className="text-base leading-none">{podium.emoji}</span>
+                          )}
+                          <span className="font-bold" style={{ color: podium.color }}>
+                            {i + 1}
+                          </span>
+                        </span>
+                      ) : (
+                        i + 1
+                      )}
+                    </td>
                     <td className="px-3 py-3 font-semibold text-zinc-100">
                       <Link
                         href={`/leaderboard/${encodeURIComponent(p.email)}`}
                         className="transition-colors hover:text-[var(--lg-glow)] hover:underline"
+                        style={podium ? { color: podium.color } : undefined}
                       >
                         {p.ign || "—"}
                       </Link>

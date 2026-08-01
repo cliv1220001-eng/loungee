@@ -17,11 +17,35 @@ import type { Team } from "@/lib/types";
 
 const TEAM_ACCENTS = ["#5a7fa8", "#5a9a78", "#b08a4a", "#b0605a", "#7a86a0"];
 
-/** ms each slot spins before it locks, staggered so they settle in sequence. */
-const BASE_SPIN = 700;
-const STAGGER = 130;
-/** How fast names flip while spinning. */
-const TICK = 70;
+// Suspense timing. The reel spins for a beat, then slots lock one by one with a
+// gap that GROWS as it nears the end — a slot-machine "will it land?" deceleration
+// so the final teams settle slowly and dramatically rather than all at once.
+/** Initial spin before the first slot locks. */
+const BASE_SPIN = 1200;
+/** Gap before the next lock, at the START (fast) and END (slow) of the sequence. */
+const GAP_START = 180;
+const GAP_END = 620;
+/** Pause after the last slot before revealing the real results. */
+const TAIL = 700;
+/** How fast names flip while a slot is still spinning. */
+const TICK = 60;
+
+/**
+ * The moment (ms from start) slot `i` of `total` locks. Gaps ease from GAP_START
+ * to GAP_END across the sequence, so early slots snap in quickly and the last
+ * few land with a long, tense pause between each.
+ */
+function lockTimes(total: number): number[] {
+  const times: number[] = [];
+  let t = BASE_SPIN;
+  for (let i = 0; i < total; i++) {
+    times.push(t);
+    const progress = total <= 1 ? 1 : i / (total - 1);
+    // ease-in: gaps stay short early, stretch out toward the end.
+    t += GAP_START + (GAP_END - GAP_START) * (progress * progress);
+  }
+  return times;
+}
 
 export interface TeamReelProps {
   teams: Team[];
@@ -58,16 +82,17 @@ export default function TeamReel({ teams, unit, totalOf, weightOf, onDone, onSki
 
   useEffect(() => {
     const timers: number[] = [];
-    // Lock each slot on its staggered schedule.
-    slots.forEach((_, i) => {
-      timers.push(window.setTimeout(() => setLocked((n) => Math.max(n, i + 1)), BASE_SPIN + i * STAGGER));
+    const times = lockTimes(total);
+    // Lock each slot on its decelerating schedule.
+    times.forEach((at, i) => {
+      timers.push(window.setTimeout(() => setLocked((n) => Math.max(n, i + 1)), at));
     });
     // Advance the spinning-name index on an interval.
     const spin = window.setInterval(() => setTick((x) => x + 1), TICK);
-    // Finish shortly after the last slot locks.
+    // Finish after the last slot locks, plus a beat to let it land.
     const finish = window.setTimeout(
       () => doneRef.current(),
-      BASE_SPIN + total * STAGGER + 250
+      (times[times.length - 1] ?? BASE_SPIN) + TAIL
     );
     return () => {
       timers.forEach(clearTimeout);
