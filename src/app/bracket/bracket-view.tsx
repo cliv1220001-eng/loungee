@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { startingLr } from "@/lib/lr";
 import {
   buildBracket,
@@ -15,14 +16,16 @@ import {
   type ResolvedSlot,
   type Side,
 } from "@/lib/bracket";
-import {
-  BRACKET_RUN_KEY,
-  EMPTY_BRACKET_RUN,
-  useTeams,
-  usePersistentState,
-  type BracketRun,
-} from "@/lib/store";
 import type { Team } from "@/lib/types";
+
+/** Persisted bracket state, stored in the tournament's DB record (data.bracketRun). */
+interface BracketRun {
+  format?: BracketFormat;
+  seed?: number;
+  winners?: Record<string, "a" | "b">;
+  championTeamId?: number | null;
+  stake?: number;
+}
 
 const TEAM_ACCENTS = [
   "#5a7fa8",
@@ -63,53 +66,105 @@ function seededShuffle(ids: number[], seed: number): number[] {
   return arr;
 }
 
+/**
+ * A STABLE default seed derived from the tournament id. Because it's a pure
+ * function of the id, the bracket pairings are identical on every mount — no
+ * randomness, so re-opening the bracket can never reshuffle the matchups (which
+ * was desyncing saved winners). "Shuffle seeds" still overrides it explicitly.
+ */
+function seedFromRunId(runId: string): number {
+  let h = 0;
+  for (let i = 0; i < runId.length; i++) {
+    h = (Math.imul(h, 31) + runId.charCodeAt(i)) | 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * Module-level cache of the freshest bracket state per runId, surviving component
+ * REMOUNTS (which reset useState/useRef). When a pick saves, we update this; when
+ * the component remounts and reloads, we merge the DB snapshot with anything newer
+ * here — so an in-flight/stale reload can never regress winners the user just set.
+ */
+const liveBracketCache = new Map<
+  string,
+  { winners: Record<string, "a" | "b">; seq: number }
+>();
+let bracketWriteSeq = 0;
+
 export default function BracketView() {
-  // undefined = loading from storage, null = nothing saved
-  const teams = useTeams();
+  // The tournament id comes from the URL (?t=<id>). NO localStorage anywhere —
+  // the DB is the single source of truth, so the same bracket link opens the
+  // same bracket on any device / for either admin, with zero conflict.
+  const searchParams = useSearchParams();
+  const runId = searchParams.get("t") ?? "";
 
-  // POINTER only: which tournament + its LR stake. This is the ONLY thing kept
-  // in localStorage — it just says "which bracket to open". No bracket STATE
-  // (winners/seed/format) lives here, so two admins on different devices never
-  // conflict; the DB is the single source of truth for the bracket itself.
-  const [run, setRun] = usePersistentState<BracketRun>(BRACKET_RUN_KEY, EMPTY_BRACKET_RUN);
-  const runId = run.runId;
+  // Teams for this tournament, loaded from its DB record (data.result.teams).
+  // undefined = still loading; null = no tournament / no teams.
+  const [teams, setTeams] = useState<Team[] | null | undefined>(undefined);
 
-  // Bracket STATE — in memory only, loaded from and saved to the DB.
+  // Bracket STATE — in memory, loaded from and saved to the DB. The seed defaults
+  // deterministically from the id so pairings are identical on every open.
   const [format, setFormat] = useState<BracketFormat>("single");
-  const [seed, setSeed] = useState<number>(0);
+  const [seed, setSeed] = useState<number>(() => (runId ? seedFromRunId(runId) : 0));
   const [winners, setWinners] = useState<Record<string, "a" | "b">>({});
-  // The runId whose DB state we've loaded. Gates saving so we never overwrite a
-  // good DB record before we've read it in.
+  const [stake, setStake] = useState<number>(0);
+  // The id whose DB state we've loaded; gates the save effect so we never
+  // overwrite a good DB record before we've read it in.
   const [loadedRunId, setLoadedRunId] = useState<string | null>(null);
   const dbLoaded = loadedRunId === runId && runId !== "";
 
-  // Mint a run id the first time the bracket is opened without one (direct nav).
+  // Load the bracket for this runId on mount / id change. Runs once per mount;
+  // after it applies data (setLoadedRunId), the dep array [runId] means it won't
+  // fire again unless the id changes. Winners are never re-set by this effect
+  // after the initial load, so it can't wipe in-progress picks. On a fresh mount
+  // (navigating back) teams is undefined again, so it correctly re-loads.
   useEffect(() => {
-    if (!runId) {
-      setRun({ runId: crypto.randomUUID(), format: "single", seed: 0, winners: {} });
-    }
-  }, [runId, setRun]);
-
-  // Load the authoritative bracket state from the DB whenever the tournament
-  // changes. This is the only place bracket state comes from — no localStorage.
-  useEffect(() => {
-    if (!runId) return;
     let active = true;
-    fetch(`/api/tournaments/${runId}`)
-      .then((r) => (r.ok ? r.json() : null))
+    const load = runId
+      ? fetch(`/api/tournaments/${runId}`).then((r) => (r.ok ? r.json() : null))
+      : Promise.resolve(null);
+    load
       .then((b) => {
         if (!active) return;
-        const saved = b?.tournament?.data?.bracketRun as Partial<BracketRun> | undefined;
+        const data = b?.tournament?.data as
+          | { result?: { teams?: Team[] }; bracketRun?: BracketRun; stake?: number }
+          | undefined;
+        const saved = data?.bracketRun;
+        const dbWinners = saved?.winners ?? {};
+        const dbCount = Object.keys(dbWinners).length;
+        const cached = liveBracketCache.get(runId);
+        const cacheCount = cached ? Object.keys(cached.winners).length : 0;
+        // Prefer the cache ONLY when it has MORE winners than this (possibly
+        // stale) DB response — i.e. the user advanced teams that this reload
+        // hasn't caught up to. If the DB has >= as many (a normal load, or a
+        // deliberate reset/regenerate that emptied it), trust the DB. This blocks
+        // the "stale reload wipes fresh picks" regression without resurrecting a
+        // reset bracket.
+        const useCache = cached != null && cacheCount > dbCount;
+        const winnersToApply = useCache ? cached!.winners : dbWinners;
+        // Keep the cache reconciled to whatever we actually applied.
+        liveBracketCache.set(runId, { winners: winnersToApply, seq: ++bracketWriteSeq });
+        console.log("[bracket] LOADED from DB (once)", {
+          runId,
+          dbWinners,
+          cacheCount,
+          useCache,
+          winnersToApply,
+          teamCount: data?.result?.teams?.length,
+        });
+        setTeams(data?.result?.teams ?? null);
         setFormat(saved?.format ?? "single");
-        setSeed(saved?.seed ?? Math.floor(Math.random() * 2 ** 31));
-        setWinners(saved?.winners ?? {});
-        setLoadedRunId(runId); // loaded — the save effect may now fire
+        setSeed(typeof saved?.seed === "number" ? saved.seed : runId ? seedFromRunId(runId) : 0);
+        setWinners(winnersToApply);
+        setStake(saved?.stake ?? data?.stake ?? 0);
+        setLoadedRunId(runId);
       })
       .catch(() => {
-        // No DB record (e.g. direct nav) — start fresh, still DB-backed on save.
         if (!active) return;
+        setTeams(null);
         setFormat("single");
-        setSeed(Math.floor(Math.random() * 2 ** 31));
+        setSeed(runId ? seedFromRunId(runId) : 0);
         setWinners({});
         setLoadedRunId(runId);
       });
@@ -174,27 +229,76 @@ export default function BracketView() {
 
   const championTeamId = bracket ? getChampion(bracket, resolved) : null;
   const champion = championTeamId !== null ? teamsById.get(championTeamId) : null;
-  // The champion is DERIVED from winners and persisted to the DB by the save
-  // effect below — it is never written to localStorage.
+  // The champion is DERIVED from winners and persisted to the DB by pick() /
+  // the backstop effect — it is never written to localStorage.
+
+  // Persist bracket state to the DB. Called EXPLICITLY from pick / reshuffle /
+  // changeFormat with the exact next values — never from an effect, so a DB load
+  // (which sets seed/format/winners) can never trigger a racing save. Guards on
+  // dbLoaded so we never overwrite a good record before it's loaded.
+  const saveBracketState = useCallback(
+    (
+      nextFormat: BracketFormat,
+      nextSeed: number,
+      nextWinners: Record<string, "a" | "b">,
+      nextChampion: number | null
+    ) => {
+      if (!runId || !dbLoaded || !teams || !bracket) {
+        console.log("[bracket] save SKIPPED (not loaded yet)", {
+          runId,
+          dbLoaded,
+          hasTeams: !!teams,
+          hasBracket: !!bracket,
+        });
+        return;
+      }
+      // Record the freshest winners in the remount-surviving cache BEFORE the
+      // network call, so any concurrent reload sees them immediately.
+      liveBracketCache.set(runId, { winners: nextWinners, seq: ++bracketWriteSeq });
+      console.log("[bracket] SAVING", { nextWinners, nextChampion });
+      void fetch(`/api/tournaments/${runId}/bracket`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          format: nextFormat,
+          seed: nextSeed,
+          winners: nextWinners,
+          championTeamId: nextChampion,
+        }),
+      })
+        .then((r) => console.log("[bracket] save response", r.status))
+        .catch((e) => console.log("[bracket] save error", e));
+    },
+    [runId, dbLoaded, teams, bracket]
+  );
 
   function reshuffle() {
-    setSeed((s) => s + 1);
+    const nextSeed = seed + 1;
+    setSeed(nextSeed);
     setWinners({});
+    saveBracketState(format, nextSeed, {}, null);
   }
 
   function changeFormat(next: BracketFormat) {
     setFormat(next);
     setWinners({});
+    saveBracketState(next, seed, {}, null);
   }
 
   function pick(matchId: string, side: Side) {
     if (!bracket) return;
     const current = winners[matchId];
-    setWinners(
+    const next =
       current === side
         ? clearWinner(bracket, winners, matchId)
-        : setWinner(bracket, winners, matchId, side)
-    );
+        : setWinner(bracket, winners, matchId, side);
+    setWinners(next);
+    // Save the pick IMMEDIATELY with the freshly-computed next state. No debounce,
+    // no effect — so nothing races the DB load. This makes every pick durable.
+    const nextResolved = resolveBracket(bracket, next);
+    const nextChampion = getChampion(bracket, nextResolved);
+    console.log("[bracket] pick", { matchId, side, next });
+    saveBracketState(format, seed, next, nextChampion);
   }
 
   // Live LR sync: on every decision (pick / undo / reshuffle / format change),
@@ -203,7 +307,7 @@ export default function BracketView() {
   useEffect(() => {
     // Wait until the DB bracket state has loaded, so we sync real winners rather
     // than the empty pre-load state (which would wipe the run's LR events).
-    if (!run.runId || !dbLoaded || !bracket || !teams) return;
+    if (!runId || !dbLoaded || !bracket || !teams) return;
 
     const emailsOf = (teamId: number | null): string[] =>
       teamId == null
@@ -240,35 +344,23 @@ export default function BracketView() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        runId: run.runId,
+        runId,
         players,
         matches,
         teamCount: teams.length,
-        stake: run.stake ?? 0,
+        stake,
       }),
       signal: ctrl.signal,
     })
       .then(() => refreshLr()) // pull the recomputed LR back so the bracket updates
       .catch(() => {});
     return () => ctrl.abort();
-  }, [run.runId, run.stake, dbLoaded, resolved, bracket, teams, teamsById, refreshLr]);
+  }, [runId, stake, dbLoaded, resolved, bracket, teams, teamsById, refreshLr]);
 
-  // Persist the FULL bracket state (format, seed, winners, champion) to the DB
-  // on every change, debounced. The DB is the single source of truth, so this is
-  // what both admins read back — surviving refresh, reset, and other devices.
-  useEffect(() => {
-    // Never save before we've loaded from the DB — otherwise the empty pre-load
-    // state would overwrite a good DB record.
-    if (!runId || !dbLoaded) return;
-    const t = window.setTimeout(() => {
-      void fetch(`/api/tournaments/${runId}/bracket`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ format, seed, winners, championTeamId }),
-      }).catch(() => {});
-    }, 600);
-    return () => window.clearTimeout(t);
-  }, [runId, format, seed, winners, championTeamId, dbLoaded]);
+  // NO save-on-effect. Every save is EXPLICIT (pick / reshuffle / changeFormat)
+  // so that loading the bracket from the DB — which sets seed/format/winners —
+  // can never trigger a save that races the load and overwrites good winners.
+  // (That effect-based save was the "advances not saved / reset on reopen" bug.)
 
   if (teams === undefined) {
     return <Shell><p className="text-zinc-500">Loading bracket…</p></Shell>;
@@ -548,17 +640,17 @@ export default function BracketView() {
 
         <span className="text-sm text-zinc-500">{teams.length} teams</span>
 
-        {(run.stake ?? 0) > 0 && (
+        {stake > 0 && (
           <span
             title="LR bet — every match win/loss pays this instead of the normal scale"
             className="rounded-full bg-[var(--accent)]/15 px-3 py-1 text-sm font-bold text-[var(--lg-glow)]"
           >
-            LR bet ±{run.stake}
+            LR bet ±{stake}
           </span>
         )}
 
         <Link
-          href="/"
+          href={runId ? `/?t=${encodeURIComponent(runId)}` : "/"}
           className="ml-auto text-sm font-semibold text-[var(--lg-glow)] hover:opacity-80"
         >
           ← Edit teams

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { pairsOf, type BalanceBasis, type BalanceMode, type BalanceResult } from "@/lib/balance";
 import {
@@ -17,13 +17,7 @@ import DraftReveal from "./draft-reveal";
 import TeamReel from "./team-reel";
 import ForestRanger from "./forest-ranger";
 import { startingLr } from "@/lib/lr";
-import {
-  restoreBracketRun,
-  saveTeams,
-  startBracketRun,
-  usePersistentState,
-  type BracketRun,
-} from "@/lib/store";
+import { usePersistentState } from "@/lib/store";
 import { ROLE_LABELS, type Role, type Team } from "@/lib/types";
 
 interface DraftPlayer {
@@ -224,18 +218,34 @@ function parseBulk(text: string): BulkRow[] {
   return out;
 }
 
-export default function Balancer() {
+export default function Balancer({
+  initialTournamentId = null,
+}: {
+  initialTournamentId?: string | null;
+}) {
   const router = useRouter();
   // Persisted across reloads (roster, chosen mode, last result).
   const [session, setSession] = usePersistentState<BalancerSession>(SESSION_KEY, DEFAULT_SESSION);
+  // What the balancer PERSISTS: the session with bracket-owned keys stripped, so
+  // a stale bracketRun/championTeamId snapshot can never be written back over the
+  // DB's live bracket state. The [id] PUT merges the real bracketRun back in.
+  const sessionForSave = useMemo(() => {
+    const s = session as BalancerSession & { bracketRun?: unknown; championTeamId?: unknown };
+    const { bracketRun: _br, championTeamId: _ct, ...rest } = s;
+    void _br;
+    void _ct;
+    return rest;
+  }, [session]);
   const { rows, mode, result } = session;
   const generated = session.generated ?? null;
   const basis: BalanceBasis = session.basis ?? "lr";
   // Sessions saved before the basis toggle existed were all LR-based.
   const resultBasis: BalanceBasis = session.resultBasis ?? "lr";
   // "bracket" once teams are sent → roster/teams lock until the organizer unlocks.
+  // Only actually lock when there ARE teams to protect: a stale "bracket" phase
+  // with no generated result must not disable Generate on the roster screen.
   const phase = session.phase ?? "building";
-  const locked = phase === "bracket";
+  const locked = phase === "bracket" && Boolean(session.result);
   // The label reflects REALITY: once teams exist, 2 teams = Lobby, 3+ = Tournament,
   // regardless of what was picked at creation. Before teams, fall back to that pick.
   const effectiveKind: "lobby" | "tournament" = result
@@ -247,9 +257,8 @@ export default function Balancer() {
     setSession((s) => ({ ...s, rows: typeof updater === "function" ? updater(s.rows) : updater }));
   const setMode = (next: PageMode) => setSession((s) => ({ ...s, mode: next }));
   const setBasis = (next: BalanceBasis) => setSession((s) => ({ ...s, basis: next }));
-  // LR bet: the input UI is hidden for now, but `stake` still flows into the
-  // bracket run. Restore setStake + the hidden LR-bet row to re-enable it.
-  const stake = session.stake ?? 0;
+  // LR bet: the input UI is hidden for now. `session.stake` is saved with the
+  // tournament data and read by the bracket from the DB (data.stake).
   const setResult = (next: BalanceResult | null) => setSession((s) => ({ ...s, result: next }));
 
   // Transient UI state (not persisted).
@@ -491,6 +500,50 @@ export default function Balancer() {
     };
   }, [refreshLr]);
 
+  // Keep the champion in sync with the DB for the ACTIVE tournament. The bracket
+  // writes it live, so returning to the Teams page (mount + window focus) must
+  // re-read it — otherwise a stale "complete/champion" persists after the bracket
+  // was edited back to incomplete.
+  const currentId = current.id;
+  useEffect(() => {
+    let active = true;
+    const sync = () => {
+      if (!currentId) {
+        if (active) setRecoveredChampion(null);
+        return;
+      }
+      fetch(`/api/tournaments/${currentId}/champion`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((b) => {
+          if (active) setRecoveredChampion(b?.championTeamId ?? null);
+        })
+        .catch(() => {});
+    };
+    sync();
+    window.addEventListener("focus", sync);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", sync);
+    };
+  }, [currentId]);
+
+  // "Edit teams" on the bracket returns here as /?t=<id>. Restore that exact
+  // tournament from the DB (teams + saved advancements) unless it's already the
+  // one on screen. Runs once — a ref guard, not state, so it can't loop.
+  const autoLoadDone = useRef(false);
+  useEffect(() => {
+    if (autoLoadDone.current) return;
+    if (!initialTournamentId || initialTournamentId === current.id) {
+      autoLoadDone.current = true;
+      return;
+    }
+    autoLoadDone.current = true;
+    void loadTournament(initialTournamentId, current.name || "Tournament");
+    // loadTournament is stable enough for a one-shot mount load; deps kept minimal
+    // so this never re-fires and clobbers in-progress edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTournamentId]);
+
   // Auto-save the working session to the current tournament (debounced) so its
   // history is always up to date and reloadable.
   useEffect(() => {
@@ -501,7 +554,7 @@ export default function Balancer() {
         const res = await fetch(`/api/tournaments/${current.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: current.name, data: session }),
+          body: JSON.stringify({ name: current.name, data: sessionForSave }),
         });
         if (!res.ok) throw new Error();
         setSaveState("saved");
@@ -510,7 +563,7 @@ export default function Balancer() {
       }
     }, 1200);
     return () => window.clearTimeout(t);
-  }, [session, current.id, current.name]);
+  }, [sessionForSave, current.id, current.name]);
 
   const ready = useMemo(() => {
     const valid = rows.filter(
@@ -673,9 +726,34 @@ export default function Balancer() {
     setBulkText("");
     setBulkOpen(false);
   }
+  /**
+   * Explicitly wipe the saved bracket (winners + champion) in the DB. Call this
+   * ONLY when the teams themselves change — regenerate or reset — because the old
+   * winners are keyed to team ids/order that no longer exist. Normal saves
+   * preserve bracketRun (the tournaments PUT merges it), so this is the single,
+   * deliberate way to clear it. Also full-replaces the run's LR events with none.
+   */
+  const clearBracketRun = useCallback((id: string) => {
+    void fetch(`/api/tournaments/${id}/bracket`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: "single", winners: {}, championTeamId: null }),
+    }).catch(() => {});
+    // The bracket had LR events for its decided matches; drop them so a fresh
+    // team set doesn't inherit the previous bracket's win/loss LR.
+    void fetch("/api/lr/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: id, players: [], matches: [], teamCount: 0, stake: 0 }),
+    }).catch(() => {});
+  }, []);
+
   function reset() {
     setRows(blankRows(10));
-    setSession((s) => ({ ...s, result: null, generated: null }));
+    // Clear phase too — a reset roster is back to "building", never locked.
+    setSession((s) => ({ ...s, result: null, generated: null, phase: "building" }));
+    setRecoveredChampion(null);
+    if (current.id) clearBracketRun(current.id);
     setConfirmReset(false);
     setSearch("");
   }
@@ -721,6 +799,11 @@ export default function Balancer() {
       const fresh = body as BalanceResult;
       setSession((s) => ({ ...s, result: fresh, generated: fresh, resultBasis: basis }));
       setShuffleKey((k) => k + 1);
+      // New teams => the old bracket's winners are meaningless (different team
+      // ids/order). Explicitly clear the saved bracket + its LR so we start clean.
+      // Every OTHER save preserves bracketRun, so this deliberate clear is safe.
+      setRecoveredChampion(null);
+      if (current.id) clearBracketRun(current.id);
       // Play the slot-machine reveal, which then flips `revealed` on.
       setReeling(true);
     } catch (e) {
@@ -729,38 +812,45 @@ export default function Balancer() {
     setShuffling(false);
   }
 
-  function sendToBracket() {
-    if (!result) return;
-    saveTeams(result.teams);
-    // Group this bracket's LR/match history under the tournament id, carrying
-    // the LR bet stake so every match pays ±stake instead of the normal scale.
-    startBracketRun(current.id ?? undefined, stake);
-    registerPlayers(registryFromTeams(result.teams));
-    // Lock the teams: from here they belong to the bracket until unlocked.
-    setSession((s) => ({ ...s, phase: "bracket" }));
-    router.push("/bracket");
+  /**
+   * Persist the session (incl. teams) to the DB immediately, then open the
+   * bracket by id via the URL. The bracket loads everything from the DB — no
+   * localStorage — so it always shows the right tournament on any device.
+   */
+  async function navigateToBracket() {
+    if (!current.id) return;
+    // Flush the current session so data.result.teams is in the DB before the
+    // bracket page reads it.
+    await saveNow();
+    router.push(`/bracket?t=${encodeURIComponent(current.id)}`);
   }
 
-  /**
-   * Jump to the bracket for THIS tournament. Re-save the current teams so the
-   * bracket shows the right roster (not a stale set from another tournament).
-   *
-   * IMPORTANT: never mint a fresh run here — that would wipe the bracket winners
-   * (which, for older tournaments, live only in the browser and have no DB
-   * backup). We only sync teams; the existing run/winners are left untouched.
-   */
+  function sendToBracket() {
+    if (!result || !current.id) return;
+    registerPlayers(registryFromTeams(result.teams));
+    // Lock the teams and save, then open the bracket.
+    setSession((s) => ({ ...s, phase: "bracket" }));
+    void (async () => {
+      await saveNow();
+      router.push(`/bracket?t=${encodeURIComponent(current.id!)}`);
+    })();
+  }
+
+  /** Jump to the already-created bracket for THIS tournament (by id). */
   function showBracket() {
     if (!result) return;
-    saveTeams(result.teams);
-    router.push("/bracket");
+    void navigateToBracket();
   }
 
-  /** Deliberately go back to editing. This abandons the current bracket run —
-   *  reshuffling would otherwise desync the live bracket. */
+  /** Deliberately go back to editing. Clears the bracket winners/champion in the
+   *  DB so the completed state doesn't linger while the teams are being rebuilt. */
   function unlockTeams() {
+    // "Edit teams" just makes the roster editable again — it must NOT wipe the
+    // saved bracket. Clearing winners here was the "Edit teams resets the
+    // bracket" bug: peeking at teams and going back destroyed match results.
+    // The winners are only cleared when the teams actually change (regenerating
+    // teams produces new team ids, so the bracket rebuilds on its own).
     setSession((s) => ({ ...s, phase: "building" }));
-    setRecoveredChampion(null);
-    startBracketRun(current.id ?? undefined, stake); // fresh run: clears winners/champion
   }
 
   async function refreshList() {
@@ -810,7 +900,7 @@ export default function Balancer() {
       const res = await fetch(`/api/tournaments/${current.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: current.name, data: session }),
+        body: JSON.stringify({ name: current.name, data: sessionForSave }),
       });
       if (!res.ok) throw new Error();
       setSaveState("saved");
@@ -856,25 +946,31 @@ export default function Balancer() {
         // Restore the full saved session (mode, basis, phase-lock, etc.), not
         // just rows/result — otherwise a saved bracket-locked tournament would
         // come back unlocked. A recovered champion also implies the bracket phase.
+        //
+        // CRITICAL: strip bracket-owned keys (bracketRun / championTeamId) from
+        // the loaded data before putting them in `session`. Those keys are written
+        // by the BRACKET page and live in data.bracketRun; if they leak into the
+        // balancer's session, the balancer's auto-save PUTs a STALE snapshot of
+        // them back over the DB — wiping fresh bracket picks. The balancer must
+        // never carry or re-write these. (The [id] PUT merge preserves the DB's
+        // real bracketRun precisely because balancer saves omit the key.)
+        const { bracketRun: _dropBR, championTeamId: _dropCT, ...sessionData } =
+          data as BalancerSession & { bracketRun?: unknown; championTeamId?: unknown };
+        void _dropBR;
+        void _dropCT;
         setSession({
           ...DEFAULT_SESSION,
-          ...data,
-          mode: data.mode ?? "mmr",
-          result: data.result ?? null,
-          phase: recovered != null ? "bracket" : data.phase ?? "building",
+          ...sessionData,
+          mode: sessionData.mode ?? "mmr",
+          result: sessionData.result ?? null,
+          phase: recovered != null ? "bracket" : sessionData.phase ?? "building",
         });
         setRecoveredChampion(recovered);
         setRevealed(Boolean(data.result));
         setSaveState("saved");
         setCurrent({ id, name });
-
-        // Restore the saved bracket state so "Show Bracket" replays this exact
-        // tournament (format, seed, winners, champion) — persisted per-round in
-        // the DB. Falls back to a fresh run if none was saved.
-        const savedBracket = (
-          body.tournament?.data as { bracketRun?: Partial<BracketRun> } | undefined
-        )?.bracketRun;
-        restoreBracketRun(id, savedBracket ?? null);
+        // No bracket-state restore needed — the bracket loads everything from the
+        // DB by its URL id (?t=<id>). Nothing lives in localStorage anymore.
       } else {
         setTourneyMsg("That tournament has no saved roster.");
       }
@@ -1279,9 +1375,9 @@ export default function Balancer() {
             </span>
           </div>
 
-          {/* LR bet is hidden for now. The stake state + bracket wiring stay
-              intact (see `stake`/`setStake` and startBracketRun) so it can be
-              re-enabled by restoring this row. */}
+          {/* LR bet is hidden for now. `session.stake` is still saved with the
+              tournament and read by the bracket from the DB; restore this row to
+              re-enable the input. */}
         </div>
       </div>
 

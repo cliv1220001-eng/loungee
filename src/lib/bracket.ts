@@ -331,5 +331,9 @@ export function getChampion(
 ): number | null {
   const final = resolved[bracket.championMatchId];
   if (!final || !final.decided) return null;
+  // Both finalists must be real teams — never crown a champion from a bye or an
+  // unfilled (pending) slot, which can happen transiently while the bracket is
+  // still building or in odd-team-count brackets with byes.
+  if (final.a.teamId == null || final.b.teamId == null) return null;
   return final.winner === "a" ? final.a.teamId : final.b.teamId;
 }

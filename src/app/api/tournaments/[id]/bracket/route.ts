@@ -26,7 +26,7 @@ interface BracketState {
  * before, winners lived only in localStorage and could be wiped. Now every round
  * pick is saved to the DB and restored on load.
  */
-export async function PUT(req: NextRequest, { params }: Ctx) {
+async function saveBracket(req: NextRequest, params: Ctx["params"]) {
   try {
     const { id } = await params;
     const bracket = (await req.json()) as BracketState;
@@ -67,4 +67,15 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
   } catch (e) {
     return errorResponse(e);
   }
+}
+
+export function PUT(req: NextRequest, { params }: Ctx) {
+  return saveBracket(req, params);
+}
+
+// The client flushes a pending save on unmount via navigator.sendBeacon, which
+// can only issue a POST. It carries the same JSON body, so POST is an alias for
+// PUT here — this is what stops the last pick being lost when you leave the page.
+export function POST(req: NextRequest, { params }: Ctx) {
+  return saveBracket(req, params);
 }
