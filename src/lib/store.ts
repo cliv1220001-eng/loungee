@@ -21,6 +21,12 @@ export interface BracketRun {
    * ±stake instead of the standard +40/−40/+80 scale.
    */
   stake?: number;
+  /**
+   * The champion team's id, written by the bracket once the final is decided
+   * (and cleared if it's un-decided). Lets the Teams page show a "complete"
+   * state without re-deriving the whole bracket.
+   */
+  championTeamId?: number | null;
 }
 
 /** Deterministic default (no id yet) so SSR/hydration match; a real run is
@@ -44,6 +50,30 @@ export function startBracketRun(runId?: string, stake = 0): void {
     localStorage.setItem(BRACKET_RUN_KEY, JSON.stringify(run));
   } catch {
     // localStorage unavailable — the bracket page will mint one on load.
+  }
+}
+
+/**
+ * Point the bracket at a tournament by writing ONLY the {runId, stake} pointer.
+ * Bracket STATE (winners/seed/format/champion) is never stored here — the bracket
+ * page loads that from the DB — so two admins on different devices never conflict.
+ * Called when a tournament is loaded from history. `saved` is only used for stake.
+ */
+export function restoreBracketRun(
+  runId: string,
+  saved: Partial<Omit<BracketRun, "runId">> | null | undefined
+): void {
+  try {
+    const run: BracketRun = {
+      runId,
+      format: "single",
+      seed: 0,
+      winners: {},
+      stake: saved?.stake ?? 0,
+    };
+    localStorage.setItem(BRACKET_RUN_KEY, JSON.stringify(run));
+  } catch {
+    // localStorage unavailable — bracket page mints a fresh run on load.
   }
 }
 

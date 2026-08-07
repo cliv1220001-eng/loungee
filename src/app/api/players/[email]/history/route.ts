@@ -33,7 +33,7 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
 
     const { data: events, error: eErr } = await sb
       .from("lr_events")
-      .select("match_id,delta,created_at,kind")
+      .select("run_id,match_id,delta,created_at,kind")
       .eq("email", email)
       .order("created_at", { ascending: true });
     if (eErr) throw new Error(eErr.message);
@@ -47,6 +47,9 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
       running += ev.delta;
       const kind = ev.kind ?? "match";
       return {
+        // run + match identify a specific game (match_id like "wb-r0-m0" repeats
+        // across tournaments), so the row can fetch its roster on expand.
+        runId: ev.run_id,
         matchId: ev.match_id,
         delta: ev.delta,
         kind,

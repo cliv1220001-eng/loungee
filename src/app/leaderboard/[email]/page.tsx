@@ -1,11 +1,12 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { Fragment, use, useEffect, useState } from "react";
 import Link from "next/link";
 import { rankOf } from "@/lib/lr";
 import { ROLE_LABELS, type Role } from "@/lib/types";
 
 interface HistoryMatch {
+  runId: string;
   matchId: string;
   delta: number;
   /** 'match' = real game; 'reset'/'carry' = season bookkeeping. */
@@ -14,6 +15,12 @@ interface HistoryMatch {
   won: boolean | null;
   lr: number;
   playedAt: string;
+}
+
+/** Loaded on demand when a match row is expanded. */
+interface MatchDetail {
+  teammates: string[];
+  opponents: string[];
 }
 
 interface HistoryPlayer {
@@ -49,12 +56,14 @@ function signed(n: number): string {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
-/** Format an ISO timestamp as a short local date + time. */
+/** Format an ISO timestamp as a short date + time, fixed to Philippine time so
+ *  every viewer sees the same clock the league actually plays on. */
 function playedLabel(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? "—"
-    : d.toLocaleString(undefined, {
+    : d.toLocaleString("en-US", {
+        timeZone: "Asia/Manila",
         month: "short",
         day: "numeric",
         year: "numeric",
@@ -68,9 +77,35 @@ export default function PlayerHistoryPage({
 }: {
   params: Promise<{ email: string }>;
 }) {
-  const { email } = use(params);
+  // The route param arrives URL-encoded (e.g. "a%40b.com"); decode once so every
+  // downstream use has the real email and can encode it as needed.
+  const email = decodeURIComponent(use(params).email);
   const [data, setData] = useState<HistoryResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Which match row is expanded, and a cache of fetched rosters keyed by row.
+  const [openMatch, setOpenMatch] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, MatchDetail | "loading" | "error">>({});
+
+  /** Toggle a match row open, lazily fetching its teammates/opponents once. */
+  function toggleMatch(key: string, runId: string, matchId: string) {
+    if (openMatch === key) {
+      setOpenMatch(null);
+      return;
+    }
+    setOpenMatch(key);
+    if (details[key]) return; // already loaded/loading
+    setDetails((d) => ({ ...d, [key]: "loading" }));
+    const q = new URLSearchParams({ run: runId, match: matchId, email });
+    fetch(`/api/matches?${q}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((b: MatchDetail) =>
+        setDetails((d) => ({
+          ...d,
+          [key]: { teammates: b.teammates ?? [], opponents: b.opponents ?? [] },
+        }))
+      )
+      .catch(() => setDetails((d) => ({ ...d, [key]: "error" })));
+  }
 
   useEffect(() => {
     let active = true;
@@ -169,50 +204,131 @@ export default function PlayerHistoryPage({
                   </tr>
                 </thead>
                 <tbody>
-                  {data.matches.map((m, i) => (
-                    <tr
-                      key={`${m.matchId}-${m.playedAt}`}
-                      className="border-b border-[var(--panel-border)] last:border-0 transition-colors hover:bg-white/[0.02]"
-                    >
-                      <td className="px-4 py-3 tabular-nums text-zinc-500">
-                        {data.matches.length - i}
-                      </td>
-                      <td className="px-4 py-3 text-zinc-300">{playedLabel(m.playedAt)}</td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                            m.kind !== "match"
-                              ? "bg-white/5 text-zinc-400"
-                              : m.won
-                                ? "bg-emerald-400/10 text-emerald-400"
-                                : "bg-red-400/10 text-red-400"
+                  {data.matches.map((m, i) => {
+                    const key = `${m.runId}-${m.matchId}-${m.playedAt}`;
+                    const isMatch = m.kind === "match";
+                    const isOpen = openMatch === key;
+                    const detail = details[key];
+                    return (
+                      <Fragment key={key}>
+                        <tr
+                          onClick={
+                            isMatch ? () => toggleMatch(key, m.runId, m.matchId) : undefined
+                          }
+                          className={`border-b border-[var(--panel-border)] transition-colors ${
+                            isMatch ? "cursor-pointer hover:bg-white/[0.03]" : ""
+                          } ${isOpen ? "bg-white/[0.03]" : ""} ${
+                            data.matches.length - 1 === i && !isOpen ? "last:border-0" : ""
                           }`}
                         >
-                          {m.kind === "carry"
-                            ? "Season carry"
-                            : m.kind === "reset"
-                              ? "Season reset"
-                              : m.won
-                                ? "Win"
-                                : "Loss"}
-                        </span>
-                      </td>
-                      <td
-                        className={`px-4 py-3 text-right font-bold tabular-nums ${
-                          m.delta > 0
-                            ? "text-emerald-400"
-                            : m.delta < 0
-                              ? "text-red-400"
-                              : "text-zinc-400"
-                        }`}
-                      >
-                        {signed(m.delta)}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-[var(--lg-glow)]">
-                        {m.lr}
-                      </td>
-                    </tr>
-                  ))}
+                          <td className="px-4 py-3 tabular-nums text-zinc-500">
+                            <span className="flex items-center gap-1.5">
+                              {isMatch && (
+                                <span
+                                  className={`text-[10px] text-zinc-600 transition-transform ${
+                                    isOpen ? "rotate-90" : ""
+                                  }`}
+                                >
+                                  ▶
+                                </span>
+                              )}
+                              {data.matches.length - i}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-zinc-300">{playedLabel(m.playedAt)}</td>
+                          <td className="px-4 py-3">
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                                m.kind !== "match"
+                                  ? "bg-white/5 text-zinc-400"
+                                  : m.won
+                                    ? "bg-emerald-400/10 text-emerald-400"
+                                    : "bg-red-400/10 text-red-400"
+                              }`}
+                            >
+                              {m.kind === "carry"
+                                ? "Season carry"
+                                : m.kind === "reset"
+                                  ? "Season reset"
+                                  : m.won
+                                    ? "Win"
+                                    : "Loss"}
+                            </span>
+                          </td>
+                          <td
+                            className={`px-4 py-3 text-right font-bold tabular-nums ${
+                              m.delta > 0
+                                ? "text-emerald-400"
+                                : m.delta < 0
+                                  ? "text-red-400"
+                                  : "text-zinc-400"
+                            }`}
+                          >
+                            {signed(m.delta)}
+                          </td>
+                          <td className="px-4 py-3 text-right tabular-nums text-[var(--lg-glow)]">
+                            {m.lr}
+                          </td>
+                        </tr>
+
+                        {/* Expanded roster for this match. */}
+                        {isMatch && isOpen && (
+                          <tr className="border-b border-[var(--panel-border)] last:border-0">
+                            <td colSpan={5} className="bg-black/20 px-4 py-3">
+                              {detail === "loading" || !detail ? (
+                                <p className="text-xs text-zinc-500">Loading match…</p>
+                              ) : detail === "error" ? (
+                                <p className="text-xs text-red-300">
+                                  Couldn&apos;t load this match&apos;s roster.
+                                </p>
+                              ) : (
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                  <div className="flex flex-col gap-1.5">
+                                    <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400/80">
+                                      With ({detail.teammates.length})
+                                    </span>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {detail.teammates.length === 0 ? (
+                                        <span className="text-xs text-zinc-600">—</span>
+                                      ) : (
+                                        detail.teammates.map((n, k) => (
+                                          <span
+                                            key={`w-${k}`}
+                                            className="rounded-full bg-emerald-400/10 px-2 py-0.5 text-xs font-medium text-emerald-300"
+                                          >
+                                            {n}
+                                          </span>
+                                        ))
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-col gap-1.5">
+                                    <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400/80">
+                                      Against ({detail.opponents.length})
+                                    </span>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {detail.opponents.length === 0 ? (
+                                        <span className="text-xs text-zinc-600">—</span>
+                                      ) : (
+                                        detail.opponents.map((n, k) => (
+                                          <span
+                                            key={`o-${k}`}
+                                            className="rounded-full bg-red-400/10 px-2 py-0.5 text-xs font-medium text-red-300"
+                                          >
+                                            {n}
+                                          </span>
+                                        ))
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

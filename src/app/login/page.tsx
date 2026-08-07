@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import ForestRanger from "../forest-ranger";
+
 export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -33,14 +35,27 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="flex flex-1 items-center justify-center px-6 py-20">
+    <main className="relative flex flex-1 items-center justify-center overflow-hidden px-6 py-20">
+      {/* Woodland ranger keeping watch beside the sign-in. Hidden on small
+          screens so it never crowds the form. */}
+      <ForestRanger className="pointer-events-none absolute bottom-0 left-4 hidden h-[26rem] w-auto opacity-30 lg:block xl:left-24 xl:opacity-40" />
+      <ForestRanger className="pointer-events-none absolute bottom-0 right-4 hidden h-[22rem] w-auto -scale-x-100 opacity-20 xl:block" />
+
       <form
         onSubmit={submit}
-        className="panel animate-pop flex w-full max-w-sm flex-col gap-5 rounded-2xl p-8"
+        className="panel animate-pop relative z-10 flex w-full max-w-sm flex-col gap-5 rounded-2xl p-8"
       >
-        <div className="flex flex-col items-center gap-1 text-center">
-          <h1 className="text-2xl font-semibold tracking-tight">Dota Balancer</h1>
-          <p className="text-sm text-zinc-400">Sign in to continue</p>
+        <div className="flex flex-col items-center gap-2 text-center">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/loungee-logo.png"
+            alt="LounGee"
+            width={72}
+            height={72}
+            className="h-[72px] w-[72px] rounded-xl object-contain"
+          />
+          <h1 className="text-2xl font-semibold tracking-tight">LounGee</h1>
+          <p className="text-sm text-zinc-400">Sign in</p>
         </div>
 
         <label className="flex flex-col gap-1.5 text-sm">

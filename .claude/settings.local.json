@@ -60,10 +60,14 @@
       "Bash(cp /tmp/head-bal.tsx src/app/balancer.tsx)",
       "Bash(echo \"LINT=$?\")",
       "Bash(rm -f __TRACKED_VAR__/season-sim.mjs __TRACKED_VAR__/eu.mjs)",
-      "Bash(grep -n \"^-- 3\\\\. Close\\\\|^drop function\\\\|^create or replace function close_month\\\\|^end \\\\$\\\\$;\" supabase/seasons.sql)"
+      "Bash(grep -n \"^-- 3\\\\. Close\\\\|^drop function\\\\|^create or replace function close_month\\\\|^end \\\\$\\\\$;\" supabase/seasons.sql)",
+      "Bash(grep -n \"setDragOver\\({ teamId: team.id, playerId: null }\\)\\\\|if \\(dragging\\) applyDrop\\(dragging, { teamId: team.id, playerId: null }\\)\" src/app/balancer.tsx)",
+      "Bash(cd \"c:/Users/test/dota-balancer\" && rm -f \"src/app/api/tournaments/[id]/champion/route.ts.new\" && echo \"removed placeholder\")",
+      "Bash(grep -n \"tournaments/\\\\${run.runId}/bracket\\\\|}, \\\\[run.runId, run.format\" src/app/bracket/bracket-view.tsx)"
     ],
     "additionalDirectories": [
-      "\\tmp"
+      "\\tmp",
+      "C:\\Users\\test\\dota-balancer\\src\\app\\api\\tournaments\\[id]\\champion"
     ]
   }
 }

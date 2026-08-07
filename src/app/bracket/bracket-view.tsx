@@ -67,22 +67,56 @@ export default function BracketView() {
   // undefined = loading from storage, null = nothing saved
   const teams = useTeams();
 
-  // Bracket state (format, seed, winners) persists per run so results — and the
-  // LR already applied for them — survive navigating away and back.
+  // POINTER only: which tournament + its LR stake. This is the ONLY thing kept
+  // in localStorage — it just says "which bracket to open". No bracket STATE
+  // (winners/seed/format) lives here, so two admins on different devices never
+  // conflict; the DB is the single source of truth for the bracket itself.
   const [run, setRun] = usePersistentState<BracketRun>(BRACKET_RUN_KEY, EMPTY_BRACKET_RUN);
-  const { format, seed, winners } = run;
+  const runId = run.runId;
 
-  // Mint a run id the first time the bracket is opened without one (e.g. direct nav).
+  // Bracket STATE — in memory only, loaded from and saved to the DB.
+  const [format, setFormat] = useState<BracketFormat>("single");
+  const [seed, setSeed] = useState<number>(0);
+  const [winners, setWinners] = useState<Record<string, "a" | "b">>({});
+  // The runId whose DB state we've loaded. Gates saving so we never overwrite a
+  // good DB record before we've read it in.
+  const [loadedRunId, setLoadedRunId] = useState<string | null>(null);
+  const dbLoaded = loadedRunId === runId && runId !== "";
+
+  // Mint a run id the first time the bracket is opened without one (direct nav).
   useEffect(() => {
-    if (!run.runId) {
-      setRun({
-        runId: crypto.randomUUID(),
-        format: "single",
-        seed: Math.floor(Math.random() * 2 ** 31),
-        winners: {},
-      });
+    if (!runId) {
+      setRun({ runId: crypto.randomUUID(), format: "single", seed: 0, winners: {} });
     }
-  }, [run.runId, setRun]);
+  }, [runId, setRun]);
+
+  // Load the authoritative bracket state from the DB whenever the tournament
+  // changes. This is the only place bracket state comes from — no localStorage.
+  useEffect(() => {
+    if (!runId) return;
+    let active = true;
+    fetch(`/api/tournaments/${runId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b) => {
+        if (!active) return;
+        const saved = b?.tournament?.data?.bracketRun as Partial<BracketRun> | undefined;
+        setFormat(saved?.format ?? "single");
+        setSeed(saved?.seed ?? Math.floor(Math.random() * 2 ** 31));
+        setWinners(saved?.winners ?? {});
+        setLoadedRunId(runId); // loaded — the save effect may now fire
+      })
+      .catch(() => {
+        // No DB record (e.g. direct nav) — start fresh, still DB-backed on save.
+        if (!active) return;
+        setFormat("single");
+        setSeed(Math.floor(Math.random() * 2 ** 31));
+        setWinners({});
+        setLoadedRunId(runId);
+      });
+    return () => {
+      active = false;
+    };
+  }, [runId]);
 
   const teamsById = useMemo(() => {
     const map = new Map<number, { team: Team; accent: string }>();
@@ -138,34 +172,38 @@ export default function BracketView() {
     [bracket, winners]
   );
 
-  const champion =
-    bracket && getChampion(bracket, resolved) !== null
-      ? teamsById.get(getChampion(bracket, resolved)!)
-      : null;
+  const championTeamId = bracket ? getChampion(bracket, resolved) : null;
+  const champion = championTeamId !== null ? teamsById.get(championTeamId) : null;
+  // The champion is DERIVED from winners and persisted to the DB by the save
+  // effect below — it is never written to localStorage.
 
   function reshuffle() {
-    setRun((r) => ({ ...r, seed: r.seed + 1, winners: {} }));
+    setSeed((s) => s + 1);
+    setWinners({});
   }
 
   function changeFormat(next: BracketFormat) {
-    setRun((r) => ({ ...r, format: next, winners: {} }));
+    setFormat(next);
+    setWinners({});
   }
 
   function pick(matchId: string, side: Side) {
     if (!bracket) return;
     const current = winners[matchId];
-    const nextWinners =
+    setWinners(
       current === side
         ? clearWinner(bracket, winners, matchId)
-        : setWinner(bracket, winners, matchId, side);
-    setRun((r) => ({ ...r, winners: nextWinners }));
+        : setWinner(bracket, winners, matchId, side)
+    );
   }
 
   // Live LR sync: on every decision (pick / undo / reshuffle / format change),
   // push the FULL current set of decided real-team matches for this run. The
   // server full-replaces the run's LR events, so LR always tracks the bracket.
   useEffect(() => {
-    if (!run.runId || !bracket || !teams) return;
+    // Wait until the DB bracket state has loaded, so we sync real winners rather
+    // than the empty pre-load state (which would wipe the run's LR events).
+    if (!run.runId || !dbLoaded || !bracket || !teams) return;
 
     const emailsOf = (teamId: number | null): string[] =>
       teamId == null
@@ -213,7 +251,24 @@ export default function BracketView() {
       .then(() => refreshLr()) // pull the recomputed LR back so the bracket updates
       .catch(() => {});
     return () => ctrl.abort();
-  }, [run.runId, run.stake, resolved, bracket, teams, teamsById, refreshLr]);
+  }, [run.runId, run.stake, dbLoaded, resolved, bracket, teams, teamsById, refreshLr]);
+
+  // Persist the FULL bracket state (format, seed, winners, champion) to the DB
+  // on every change, debounced. The DB is the single source of truth, so this is
+  // what both admins read back — surviving refresh, reset, and other devices.
+  useEffect(() => {
+    // Never save before we've loaded from the DB — otherwise the empty pre-load
+    // state would overwrite a good DB record.
+    if (!runId || !dbLoaded) return;
+    const t = window.setTimeout(() => {
+      void fetch(`/api/tournaments/${runId}/bracket`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ format, seed, winners, championTeamId }),
+      }).catch(() => {});
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [runId, format, seed, winners, championTeamId, dbLoaded]);
 
   if (teams === undefined) {
     return <Shell><p className="text-zinc-500">Loading bracket…</p></Shell>;
@@ -442,12 +497,30 @@ export default function BracketView() {
     <Shell>
       {champion && (
         <div
-          className="panel animate-pop mb-2 flex items-center justify-center gap-3 rounded-2xl py-5 text-center"
+          className="panel animate-pop mb-2 flex flex-col items-center gap-3 rounded-2xl px-6 py-6 text-center"
           style={{ borderColor: champion.accent }}
         >
-          <span className="text-lg font-extrabold" style={{ color: champion.accent }}>
+          <span className="text-3xl">🏆</span>
+          <span className="text-xl font-extrabold" style={{ color: champion.accent }}>
             Team {champion.team.id} wins the tournament!
           </span>
+          {/* The winning roster. */}
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            {champion.team.players.map((p) => (
+              <span
+                key={p.id}
+                className="flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm font-semibold"
+                style={{ borderColor: `${champion.accent}55`, color: champion.accent }}
+              >
+                {p.role && (
+                  <span className="rounded bg-white/10 px-1 text-[10px] font-bold tabular-nums text-zinc-200">
+                    {p.role}
+                  </span>
+                )}
+                {p.name}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 

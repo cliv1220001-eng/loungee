@@ -15,8 +15,15 @@ import {
 } from "@/lib/draft";
 import DraftReveal from "./draft-reveal";
 import TeamReel from "./team-reel";
+import ForestRanger from "./forest-ranger";
 import { startingLr } from "@/lib/lr";
-import { saveTeams, startBracketRun, usePersistentState } from "@/lib/store";
+import {
+  restoreBracketRun,
+  saveTeams,
+  startBracketRun,
+  usePersistentState,
+  type BracketRun,
+} from "@/lib/store";
 import { ROLE_LABELS, type Role, type Team } from "@/lib/types";
 
 interface DraftPlayer {
@@ -50,8 +57,6 @@ function registerPlayers(players: ReturnType<typeof registryFromTeams>): void {
     body: JSON.stringify({ players }),
   }).catch(() => {});
 }
-
-const ROLES: Role[] = [1, 2, 3, 4, 5];
 
 // Strategies. What they weight by (LR or MMR) is chosen separately — see BASES.
 // "draft" is not a server balancing mode: it runs entirely client-side as an
@@ -118,6 +123,21 @@ interface BalancerSession {
    * match win/loss pays ±stake instead. Carried into the bracket run.
    */
   stake?: number;
+  /**
+   * "building" — still editing roster/teams. "bracket" — teams have been sent to
+   * the bracket and are LOCKED (no reshuffle) until the organizer unlocks.
+   */
+  phase?: "building" | "bracket";
+  /**
+   * Chosen at creation: a "lobby" game (typically 2 teams) vs a full
+   * "tournament" (3+). Purely a label — it doesn't change how teams are built.
+   */
+  kind?: "lobby" | "tournament";
+}
+
+/** Human label for a tournament kind. */
+function kindLabel(kind: "lobby" | "tournament" | undefined): string {
+  return kind === "lobby" ? "Lobby Game" : "Tournament";
 }
 
 const SESSION_KEY = "dota-balancer:session";
@@ -213,13 +233,23 @@ export default function Balancer() {
   const basis: BalanceBasis = session.basis ?? "lr";
   // Sessions saved before the basis toggle existed were all LR-based.
   const resultBasis: BalanceBasis = session.resultBasis ?? "lr";
+  // "bracket" once teams are sent → roster/teams lock until the organizer unlocks.
+  const phase = session.phase ?? "building";
+  const locked = phase === "bracket";
+  // The label reflects REALITY: once teams exist, 2 teams = Lobby, 3+ = Tournament,
+  // regardless of what was picked at creation. Before teams, fall back to that pick.
+  const effectiveKind: "lobby" | "tournament" = result
+    ? result.teams.length <= 2
+      ? "lobby"
+      : "tournament"
+    : session.kind ?? "tournament";
   const setRows = (updater: DraftPlayer[] | ((prev: DraftPlayer[]) => DraftPlayer[])) =>
     setSession((s) => ({ ...s, rows: typeof updater === "function" ? updater(s.rows) : updater }));
   const setMode = (next: PageMode) => setSession((s) => ({ ...s, mode: next }));
   const setBasis = (next: BalanceBasis) => setSession((s) => ({ ...s, basis: next }));
+  // LR bet: the input UI is hidden for now, but `stake` still flows into the
+  // bracket run. Restore setStake + the hidden LR-bet row to re-enable it.
   const stake = session.stake ?? 0;
-  const setStake = (next: number) =>
-    setSession((s) => ({ ...s, stake: Number.isFinite(next) && next > 0 ? Math.round(next) : 0 }));
   const setResult = (next: BalanceResult | null) => setSession((s) => ({ ...s, result: next }));
 
   // Transient UI state (not persisted).
@@ -228,6 +258,9 @@ export default function Balancer() {
   const [revealed, setRevealed] = useState(false);
   /** True while the slot-machine reveal is playing on freshly built teams. */
   const [reeling, setReeling] = useState(false);
+  // A locked (sent-to-bracket / completed) tournament always shows its teams —
+  // no "Show Teams" gate to click through. Otherwise it follows `revealed`.
+  const showTeams = Boolean(result) && (revealed || locked);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [genError, setGenError] = useState<string | null>(null);
@@ -238,10 +271,52 @@ export default function Balancer() {
 
   // Saved tournaments (Supabase-backed).
   const [current, setCurrent] = usePersistentState<CurrentTournament>(CURRENT_KEY, NO_TOURNAMENT);
+  // The champion for the loaded tournament comes from the DB (the saved bracket
+  // champion, or reconstructed from LR history) — fetched on load. Never from
+  // localStorage, which is per-device and would conflict between the 2 admins.
+  const [recoveredChampion, setRecoveredChampion] = useState<number | null>(null);
+  const championTeamId = recoveredChampion;
+  // Only treat a champion as "ours" when locked and the teams contain that id.
+  const champion =
+    locked && championTeamId != null
+      ? (result?.teams.find((t) => t.id === championTeamId) ?? null)
+      : null;
   const [newName, setNewName] = useState("");
-  const [savedList, setSavedList] = useState<{ id: string; name: string; created_at: string }[] | null>(null);
+  const [savedList, setSavedList] = useState<
+    | {
+        id: string;
+        name: string;
+        created_at: string;
+        kind?: "lobby" | "tournament";
+        teamCount?: number;
+        championTeamId?: number | null;
+        championPlayers?: string[];
+        status?: "complete" | "in-progress" | "draft";
+      }[]
+    | null
+  >(null);
   /** Tournament id awaiting delete confirmation (guards an irreversible action). */
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  /** History pagination + search — keeps the list short (footer reachable) and
+   *  lets you find a tournament by name or a winning player without paging. */
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const HISTORY_PER_PAGE = 6;
+
+  // Filter by tournament name or a champion player's name, then paginate.
+  const filteredHistory = useMemo(() => {
+    const list = savedList ?? [];
+    const q = historyQuery.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        (t.championPlayers ?? []).some((n) => n.toLowerCase().includes(q))
+    );
+  }, [savedList, historyQuery]);
+  const historyPages = Math.max(1, Math.ceil(filteredHistory.length / HISTORY_PER_PAGE));
+  // Keep the page index valid as the filter/list changes.
+  const historyPageSafe = Math.min(historyPage, historyPages - 1);
   const [tourneyBusy, setTourneyBusy] = useState(false);
   const [tourneyMsg, setTourneyMsg] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -311,7 +386,7 @@ export default function Balancer() {
     src: { teamId: number; playerId: string },
     dst: { teamId: number; playerId: string | null }
   ) {
-    if (!result) return;
+    if (!result || locked) return; // locked teams belong to the bracket
     if (src.teamId === dst.teamId && (dst.playerId === null || dst.playerId === src.playerId)) return;
 
     const teams = result.teams.map((t) => ({ ...t, players: [...t.players] }));
@@ -347,6 +422,7 @@ export default function Balancer() {
    * where HTML5 drag-and-drop does nothing. Tapping the same player deselects.
    */
   function pickPlayer(teamId: number, playerId: string) {
+    if (locked) return; // no manual swaps once teams are in the bracket
     if (!picked) {
       setPicked({ teamId, playerId });
       return;
@@ -568,9 +644,6 @@ export default function Balancer() {
   function update(id: string, patch: Partial<DraftPlayer>) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
-  function addRow() {
-    setRows((prev) => [...prev, makeRow()]);
-  }
   function removeRow(id: string) {
     setRows((prev) => (prev.length > 1 ? prev.filter((r) => r.id !== id) : prev));
   }
@@ -663,7 +736,31 @@ export default function Balancer() {
     // the LR bet stake so every match pays ±stake instead of the normal scale.
     startBracketRun(current.id ?? undefined, stake);
     registerPlayers(registryFromTeams(result.teams));
+    // Lock the teams: from here they belong to the bracket until unlocked.
+    setSession((s) => ({ ...s, phase: "bracket" }));
     router.push("/bracket");
+  }
+
+  /**
+   * Jump to the bracket for THIS tournament. Re-save the current teams so the
+   * bracket shows the right roster (not a stale set from another tournament).
+   *
+   * IMPORTANT: never mint a fresh run here — that would wipe the bracket winners
+   * (which, for older tournaments, live only in the browser and have no DB
+   * backup). We only sync teams; the existing run/winners are left untouched.
+   */
+  function showBracket() {
+    if (!result) return;
+    saveTeams(result.teams);
+    router.push("/bracket");
+  }
+
+  /** Deliberately go back to editing. This abandons the current bracket run —
+   *  reshuffling would otherwise desync the live bracket. */
+  function unlockTeams() {
+    setSession((s) => ({ ...s, phase: "building" }));
+    setRecoveredChampion(null);
+    startBracketRun(current.id ?? undefined, stake); // fresh run: clears winners/champion
   }
 
   async function refreshList() {
@@ -679,13 +776,13 @@ export default function Balancer() {
   }
 
   // Create a fresh tournament and make it the active one (blank roster).
-  async function startTournament() {
+  async function startTournament(kind: "lobby" | "tournament" = "tournament") {
     const name = newName.trim();
     if (!name || tourneyBusy) return;
     setTourneyBusy(true);
     setTourneyMsg(null);
     try {
-      const fresh: BalancerSession = { rows: blankRows(10), mode: "mmr", result: null };
+      const fresh: BalancerSession = { rows: blankRows(10), mode: "mmr", result: null, kind };
       const res = await fetch("/api/tournaments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -694,6 +791,7 @@ export default function Balancer() {
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? "Could not create tournament.");
       setSession(fresh);
+      setRecoveredChampion(null);
       setRevealed(false);
       setNewName("");
       setSaveState("saved");
@@ -736,10 +834,47 @@ export default function Balancer() {
       if (!res.ok) throw new Error(body.error ?? "Load failed.");
       const data = body.tournament?.data as BalancerSession | undefined;
       if (data && Array.isArray(data.rows)) {
-        setSession({ rows: data.rows, mode: data.mode ?? "mmr", result: data.result ?? null });
+        // Recover the champion for PAST tournaments (played before bracket state
+        // was saved). If LR history shows a decisive winner, load it as a
+        // completed, locked tournament.
+        setRecoveredChampion(null);
+        // The champion for this tournament comes from the DB (either the saved
+        // bracket champion or reconstructed from LR history) — NEVER from the
+        // volatile localStorage run, which may belong to another tournament.
+        let recovered: number | null = null;
+        if (data.result) {
+          try {
+            const cr = await fetch(`/api/tournaments/${id}/champion`).then((r) =>
+              r.ok ? r.json() : null
+            );
+            recovered = cr?.championTeamId ?? null;
+          } catch {
+            // history unavailable — just load normally
+          }
+        }
+
+        // Restore the full saved session (mode, basis, phase-lock, etc.), not
+        // just rows/result — otherwise a saved bracket-locked tournament would
+        // come back unlocked. A recovered champion also implies the bracket phase.
+        setSession({
+          ...DEFAULT_SESSION,
+          ...data,
+          mode: data.mode ?? "mmr",
+          result: data.result ?? null,
+          phase: recovered != null ? "bracket" : data.phase ?? "building",
+        });
+        setRecoveredChampion(recovered);
         setRevealed(Boolean(data.result));
         setSaveState("saved");
         setCurrent({ id, name });
+
+        // Restore the saved bracket state so "Show Bracket" replays this exact
+        // tournament (format, seed, winners, champion) — persisted per-round in
+        // the DB. Falls back to a fresh run if none was saved.
+        const savedBracket = (
+          body.tournament?.data as { bracketRun?: Partial<BracketRun> } | undefined
+        )?.bracketRun;
+        restoreBracketRun(id, savedBracket ?? null);
       } else {
         setTourneyMsg("That tournament has no saved roster.");
       }
@@ -783,22 +918,10 @@ export default function Balancer() {
         inputMode="numeric"
         maxLength={5}
         placeholder="MMR"
-        className="field w-12 shrink-0 rounded-md px-1 py-1.5 text-center text-[12px] tabular-nums"
+        className="field w-14 shrink-0 rounded-md px-1 py-1.5 text-center text-[12px] tabular-nums"
       />
-      <select
-        value={row.role ?? ""}
-        onChange={(e) =>
-          update(row.id, { role: e.target.value ? (Number(e.target.value) as Role) : null })
-        }
-        className="field w-16 shrink-0 rounded-md px-1 py-1.5 text-[11px]"
-      >
-        <option value="">Any</option>
-        {ROLES.map((r) => (
-          <option key={r} value={r}>
-            POS {r}
-          </option>
-        ))}
-      </select>
+      {/* Position isn't editable here — it comes from the bulk paste (Email · IGN
+          · MMR · Position). Spread Roles / Draft still use it internally. */}
       <button
         onClick={() => removeRow(row.id)}
         aria-label="Remove player"
@@ -814,66 +937,172 @@ export default function Balancer() {
   // Gate: pick or create a tournament before building a roster.
   if (!current.id) {
     return (
-      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 py-16">
+      <main className="relative mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 py-16">
+        {/* Woodland rangers in the gutters — decorative, out of the way. */}
+        <ForestRanger className="pointer-events-none fixed bottom-0 left-6 hidden h-[30rem] w-auto opacity-25 xl:block 2xl:left-24 2xl:opacity-35" />
+        <ForestRanger className="pointer-events-none fixed bottom-0 right-6 hidden h-[24rem] w-auto -scale-x-100 opacity-20 2xl:block" />
+
         <header className="flex flex-col gap-3 text-center">
           <h1 className="gradient-text text-4xl font-extrabold tracking-tight sm:text-5xl">
-            New Tournament
+            Loungee Organizer
           </h1>
-          <p className="text-zinc-400">
-            Loungee Tournament
-          </p>
         </header>
 
-        <div className="panel flex flex-col gap-3 rounded-2xl p-5">
+        <div className="panel flex flex-col gap-4 rounded-2xl p-5">
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              void startTournament();
+              void startTournament("tournament");
             }}
-            className="flex flex-wrap items-center gap-2"
+            className="flex flex-col gap-3"
           >
             <input
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="e.g. Micro Tournament #1"
               autoFocus
-              className="field min-w-48 flex-1 rounded-lg px-3 py-2.5 text-sm"
+              className="field w-full rounded-lg px-3 py-2.5 text-sm"
             />
-            <button
-              type="submit"
-              disabled={tourneyBusy || newName.trim() === ""}
-              className="btn-neon rounded-full px-6 py-2.5 text-sm"
-            >
-              Start →
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => void startTournament("lobby")}
+                disabled={tourneyBusy || newName.trim() === ""}
+                className="flex flex-1 flex-col items-start gap-0.5 rounded-xl border border-[var(--panel-border)] px-4 py-3 text-left transition-colors hover:bg-white/5 disabled:opacity-40"
+              >
+                <span className="text-sm font-bold text-zinc-100">Start Lobby Game →</span>
+                <span className="text-xs text-zinc-500">Loungee Lobby Games</span>
+              </button>
+              <button
+                type="submit"
+                disabled={tourneyBusy || newName.trim() === ""}
+                className="flex flex-1 flex-col items-start gap-0.5 rounded-xl px-4 py-3 text-left transition-colors disabled:opacity-40 btn-neon"
+              >
+                <span className="text-sm font-bold">Start Tournament →</span>
+                <span className="text-xs opacity-80">Loungee Tournament</span>
+              </button>
+            </div>
           </form>
           {tourneyMsg && <p className="text-xs text-red-300">{tourneyMsg}</p>}
         </div>
 
-        <div className="panel flex flex-col gap-1.5 rounded-2xl p-5">
-          <span className="px-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">
-            History
-          </span>
+        <div className="panel flex flex-col gap-2.5 rounded-2xl p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-1">
+            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+              History
+            </span>
+            {savedList && savedList.length > 0 && (
+              <div className="relative">
+                <input
+                  value={historyQuery}
+                  onChange={(e) => {
+                    setHistoryQuery(e.target.value);
+                    setHistoryPage(0);
+                  }}
+                  placeholder="Search name or winner…"
+                  className="field w-56 rounded-full py-1 pl-8 pr-8 text-xs"
+                />
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-xs text-zinc-500">
+                  ⌕
+                </span>
+                {historyQuery !== "" && (
+                  <button
+                    onClick={() => setHistoryQuery("")}
+                    aria-label="Clear search"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-zinc-500 hover:text-white"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           {savedList === null ? (
             <p className="text-sm text-zinc-500">Loading…</p>
           ) : savedList.length === 0 ? (
             <p className="text-sm text-zinc-500">No saved tournaments yet.</p>
+          ) : filteredHistory.length === 0 ? (
+            <p className="py-2 text-sm text-zinc-500">No tournaments match “{historyQuery}”.</p>
           ) : (
-            savedList.map((t) => (
+            filteredHistory
+              .slice(
+                historyPageSafe * HISTORY_PER_PAGE,
+                historyPageSafe * HISTORY_PER_PAGE + HISTORY_PER_PAGE
+              )
+              .map((t) => (
               <div
                 key={t.id}
-                className="group flex items-center gap-2 rounded-md text-sm transition-colors hover:bg-white/5"
+                className="group relative flex flex-col gap-1.5 rounded-lg border border-[var(--panel-border)] bg-white/[0.015] p-2.5 transition-colors hover:border-[var(--accent)]/40 hover:bg-white/[0.03]"
               >
+                {/* Top line: name + type/count on the left, status + date right. */}
                 <button
                   onClick={() => loadTournament(t.id, t.name)}
                   disabled={tourneyBusy}
-                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-left"
+                  className="flex min-w-0 items-center justify-between gap-3 text-left"
                 >
-                  <span className="truncate font-semibold">{t.name}</span>
-                  <span className="ml-auto shrink-0 text-xs text-zinc-500">
-                    {new Date(t.created_at).toLocaleDateString()}
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-[13px] font-bold text-zinc-100">{t.name}</span>
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide ${
+                        t.kind === "lobby"
+                          ? "bg-white/5 text-zinc-400"
+                          : "bg-[var(--accent)]/10 text-[var(--lg-glow)]"
+                      }`}
+                    >
+                      {t.kind === "lobby" ? "Lobby" : "Tournament"}
+                    </span>
+                    {typeof t.teamCount === "number" && t.teamCount > 0 && (
+                      <span className="shrink-0 text-[10px] text-zinc-600">{t.teamCount} teams</span>
+                    )}
+                  </span>
+
+                  <span className="flex shrink-0 items-center gap-2 pr-5">
+                    {t.status === "in-progress" ? (
+                      <span className="rounded-full bg-amber-400/10 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-300">
+                        In progress
+                      </span>
+                    ) : t.status === "draft" ? (
+                      <span className="rounded-full bg-white/5 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-zinc-500">
+                        Draft
+                      </span>
+                    ) : (
+                      <span className="rounded-full bg-emerald-400/10 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-emerald-400">
+                        Complete
+                      </span>
+                    )}
+                    <span className="text-[10px] text-zinc-600">
+                      {new Date(t.created_at).toLocaleDateString("en-US", {
+                        timeZone: "Asia/Manila",
+                      })}
+                    </span>
                   </span>
                 </button>
+
+                {/* Winner line — compact, names on one row. */}
+                {t.status === "complete" && t.championTeamId != null && (
+                  <button
+                    onClick={() => loadTournament(t.id, t.name)}
+                    disabled={tourneyBusy}
+                    title={
+                      t.championPlayers && t.championPlayers.length
+                        ? `Team ${t.championTeamId}: ${t.championPlayers.join(", ")}`
+                        : undefined
+                    }
+                    className="flex min-w-0 items-center gap-2 rounded-md bg-[var(--accent)]/[0.07] px-2 py-1 text-left"
+                  >
+                    <span className="shrink-0 text-[11px]">🏆</span>
+                    <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-zinc-500">
+                      T{t.championTeamId}
+                    </span>
+                    <span className="truncate text-[12px] font-semibold text-[var(--lg-glow)]">
+                      {t.championPlayers && t.championPlayers.length
+                        ? t.championPlayers.join(" · ")
+                        : `Team ${t.championTeamId}`}
+                    </span>
+                  </button>
+                )}
+
+                {/* Delete — a hover action in the corner, out of the content flow. */}
                 <button
                   onClick={() => {
                     if (confirmDelete === t.id) deleteTournament(t.id);
@@ -882,16 +1111,40 @@ export default function Balancer() {
                   onBlur={() => setConfirmDelete(null)}
                   disabled={tourneyBusy}
                   aria-label={confirmDelete === t.id ? "Confirm delete" : "Delete tournament"}
-                  className={`shrink-0 rounded-md px-2 py-2 text-xs font-semibold transition-colors ${
+                  className={`absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] font-semibold transition-all ${
                     confirmDelete === t.id
-                      ? "text-red-400"
-                      : "text-zinc-600 hover:text-red-400 group-hover:text-zinc-400"
+                      ? "bg-red-500/15 text-red-400 opacity-100"
+                      : "text-zinc-600 opacity-0 hover:text-red-400 group-hover:opacity-100"
                   }`}
                 >
-                  {confirmDelete === t.id ? "Sure?" : "✕"}
+                  {confirmDelete === t.id ? "Delete?" : "✕"}
                 </button>
               </div>
             ))
+          )}
+
+          {/* Pagination — only when the filtered list spills past one page. */}
+          {filteredHistory.length > HISTORY_PER_PAGE && (
+            <div className="flex items-center justify-between px-1 pt-1.5 text-xs text-zinc-500">
+              <button
+                onClick={() => setHistoryPage((p) => Math.max(0, p - 1))}
+                disabled={historyPageSafe === 0}
+                className="rounded-md px-2 py-1 font-semibold transition-colors hover:bg-white/5 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                ← Prev
+              </button>
+              <span className="tabular-nums">
+                Page {historyPageSafe + 1} of {historyPages}
+                <span className="ml-1.5 text-zinc-600">· {filteredHistory.length} total</span>
+              </span>
+              <button
+                onClick={() => setHistoryPage((p) => Math.min(historyPages - 1, p + 1))}
+                disabled={historyPageSafe >= historyPages - 1}
+                className="rounded-md px-2 py-1 font-semibold transition-colors hover:bg-white/5 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                Next →
+              </button>
+            </div>
           )}
         </div>
       </main>
@@ -902,7 +1155,7 @@ export default function Balancer() {
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-10 px-6 py-12">
       <header className="flex flex-col gap-3 text-center sm:text-left">
         <h1 className="gradient-text text-4xl font-extrabold tracking-tight sm:text-5xl">
-          Loungee Tournament Organizer
+          Loungee Organizer
         </h1>
       </header>
 
@@ -910,7 +1163,7 @@ export default function Balancer() {
       <div className="panel flex flex-wrap items-center gap-3 rounded-2xl p-4">
         <div className="flex min-w-0 flex-col">
           <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-            Tournament
+            {kindLabel(effectiveKind)}
           </span>
           <span className="truncate text-lg font-bold text-zinc-100">{current.name}</span>
         </div>
@@ -989,8 +1242,8 @@ export default function Balancer() {
           })}
         </div>
 
-        {/* Secondary settings: what strength is measured by, and the LR stake.
-            Grouped into one panel with aligned labels so the rows read as a set. */}
+        {/* Secondary settings — what team strength is measured by. (The LR-bet
+            row that used to sit here is hidden for now.) */}
         <div className="panel flex flex-col divide-y divide-[var(--panel-border)] rounded-xl">
           {/* Balance by */}
           <div
@@ -1026,53 +1279,9 @@ export default function Balancer() {
             </span>
           </div>
 
-          {/* LR bet — one stake for the whole tournament. Overrides the normal
-              +40/−40/+80 scale so every match win/loss pays ±stake. */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
-            <span className="w-20 shrink-0 text-xs font-semibold uppercase tracking-wider text-zinc-500">
-              LR bet
-            </span>
-            <div className="flex items-center gap-2">
-              <div className="relative flex items-center">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={stake > 0 ? String(stake) : ""}
-                  onChange={(e) =>
-                    setStake(Number(e.target.value.replace(/[^0-9]/g, "").slice(0, 6)))
-                  }
-                  placeholder="Off"
-                  aria-label="LR bet stake"
-                  className={`field w-24 rounded-full py-1 pl-3 pr-8 text-sm font-semibold tabular-nums ${
-                    stake > 0 ? "text-[var(--lg-glow)]" : ""
-                  }`}
-                />
-                <span className="pointer-events-none absolute right-3 text-[10px] uppercase text-zinc-500">
-                  LR
-                </span>
-              </div>
-              {stake > 0 && (
-                <button
-                  onClick={() => setStake(0)}
-                  aria-label="Clear LR bet"
-                  className="rounded-full px-2 py-1 text-xs font-semibold text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-            <span className="text-xs text-zinc-500">
-              {stake > 0 ? (
-                <>
-                  Winners{" "}
-                  <span className="font-semibold text-emerald-400">+{stake}</span>, losers{" "}
-                  <span className="font-semibold text-red-400">−{stake}</span> LR every match.
-                </>
-              ) : (
-                "Off — standard +40 / −40 / +80 scoring."
-              )}
-            </span>
-          </div>
+          {/* LR bet is hidden for now. The stake state + bracket wiring stay
+              intact (see `stake`/`setStake` and startBracketRun) so it can be
+              re-enabled by restoring this row. */}
         </div>
       </div>
 
@@ -1140,14 +1349,8 @@ export default function Balancer() {
 
           <div className="ml-auto flex items-center gap-3">
             <button
-              onClick={addRow}
-              className="text-sm font-semibold text-[var(--lg-glow)] transition-opacity hover:opacity-80"
-            >
-              + Add player
-            </button>
-            <button
               onClick={() => setBulkOpen((o) => !o)}
-              className="text-sm font-semibold text-zinc-400 transition-opacity hover:opacity-80"
+              className="text-sm font-semibold text-[var(--lg-glow)] transition-opacity hover:opacity-80"
             >
               Bulk add
             </button>
@@ -1176,7 +1379,7 @@ export default function Balancer() {
                   </div>
                   <span className="text-[11px] text-zinc-500">{t.range} MMR</span>
                 </div>
-                <div className="flex max-h-[60vh] flex-col gap-2 overflow-y-auto pr-1">
+                <div className="tier-scroll flex max-h-[40vh] min-h-[7rem] flex-col gap-2 overflow-y-auto pr-1">
                   {tierRows.length === 0 ? (
                     <p className="px-1 py-3 text-center text-[11px] text-zinc-600">
                       {search.trim() !== "" && tierAll.length > 0 ? "No match" : "No players"}
@@ -1281,17 +1484,19 @@ export default function Balancer() {
             )}
             <button
               onClick={mode === "draft" ? beginDraft : generate}
-              disabled={!canGenerate || shuffling}
+              disabled={!canGenerate || shuffling || locked}
               title={
-                canGenerate
-                  ? `${
-                      mode === "random"
-                        ? "Random"
-                        : mode === "draft"
-                          ? `Captain's Draft by ${basis === "lr" ? "LR" : "MMR"}`
-                          : `Balance by ${basis === "lr" ? "LR" : "MMR"}`
-                    } · ${numTeams} teams`
-                  : "Need at least 2 full teams"
+                locked
+                  ? "Teams are locked in the bracket — unlock to reshuffle."
+                  : canGenerate
+                    ? `${
+                        mode === "random"
+                          ? "Random"
+                          : mode === "draft"
+                            ? `Captain's Draft by ${basis === "lr" ? "LR" : "MMR"}`
+                            : `Balance by ${basis === "lr" ? "LR" : "MMR"}`
+                      } · ${numTeams} teams`
+                    : "Need at least 2 full teams"
               }
               className="btn-neon flex items-center gap-2 rounded-full px-6 py-2.5 text-sm"
             >
@@ -1587,8 +1792,9 @@ export default function Balancer() {
       )}
 
       {/* Teams generated but not revealed and not currently reeling — e.g. a
-          restored session. A simple gate to show them. */}
-      {result && !revealed && !reeling && (
+          restored session mid-build. Skip the gate entirely once teams are
+          locked/complete: a finished tournament shows its teams straight away. */}
+      {result && !revealed && !reeling && !locked && (
         <section className="panel flex flex-col items-center gap-4 rounded-2xl py-14 text-center">
           <p className="text-lg font-semibold text-zinc-100">
             {result.teams.length} teams are ready.
@@ -1600,8 +1806,41 @@ export default function Balancer() {
       )}
 
       {/* Results */}
-      {result && revealed && (
+      {result && showTeams && (
         <section key={shuffleKey} className="flex flex-col gap-5">
+          {/* Champion banner — the tournament is complete. */}
+          {champion && (
+            <div className="panel animate-pop flex flex-wrap items-center justify-between gap-3 rounded-2xl border-[var(--accent)] px-5 py-4">
+              <span className="flex items-center gap-3">
+                <span className="text-2xl">🏆</span>
+                <span className="flex flex-col">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-[var(--lg-glow)]">
+                    {kindLabel(effectiveKind)} complete
+                  </span>
+                  <span className="text-lg font-extrabold text-zinc-100">
+                    Team {champion.id} {effectiveKind === "lobby" ? "won the lobby" : "are the champions"}
+                  </span>
+                </span>
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={showBracket}
+                  className="rounded-full border border-[var(--panel-border)] px-4 py-2.5 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+                >
+                  Show Bracket
+                </button>
+                <button
+                  onClick={() => startTournament()}
+                  disabled={tourneyBusy || newName.trim() === ""}
+                  title={newName.trim() === "" ? "Name a new tournament in the header first" : undefined}
+                  className="btn-neon rounded-full px-6 py-2.5 text-sm"
+                >
+                  New tournament →
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="flex flex-wrap items-center gap-x-2 text-sm text-zinc-400">
               <span>
@@ -1633,38 +1872,65 @@ export default function Balancer() {
               <span className="text-zinc-500">
                 {MODES.find((m) => m.key === mode)?.label ?? mode}
               </span>
-              {edited && (
+              {locked && (
+                <span className="rounded-full bg-[var(--accent)]/15 px-2 py-0.5 text-xs font-semibold text-[var(--lg-glow)]">
+                  🔒 Locked · in bracket
+                </span>
+              )}
+              {!locked && edited && (
                 <span className="rounded-full bg-amber-400/10 px-2 py-0.5 text-xs font-semibold text-amber-300">
                   edited
                 </span>
               )}
             </p>
             <div className="flex items-center gap-2">
-              {edited && (
-                <button
-                  onClick={revertTeams}
-                  className="rounded-full border border-[var(--panel-border)] px-4 py-2.5 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
-                >
-                  Revert to generated
-                </button>
+              {locked ? (
+                // Teams belong to the bracket — offer review + a deliberate unlock.
+                <>
+                  <button
+                    onClick={unlockTeams}
+                    title="Go back to editing. This resets the current bracket."
+                    className="rounded-full border border-[var(--panel-border)] px-4 py-2.5 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+                  >
+                    Unlock &amp; edit
+                  </button>
+                  {!champion && (
+                    <button onClick={showBracket} className="btn-neon rounded-full px-6 py-2.5 text-sm">
+                      Show Bracket →
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  {edited && (
+                    <button
+                      onClick={revertTeams}
+                      className="rounded-full border border-[var(--panel-border)] px-4 py-2.5 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+                    >
+                      Revert to generated
+                    </button>
+                  )}
+                  <button onClick={sendToBracket} className="btn-neon rounded-full px-6 py-2.5 text-sm">
+                    Send to Bracket →
+                  </button>
+                </>
               )}
-              <button onClick={sendToBracket} className="btn-neon rounded-full px-6 py-2.5 text-sm">
-                Send to Bracket →
-              </button>
             </div>
           </div>
-          <p className="-mt-2 text-xs text-zinc-500">
-            {picked ? (
-              <span className="text-[var(--lg-glow)]">
-                Now pick who to swap with — or tap the same player to cancel.
-              </span>
-            ) : (
-              <>
-                Drag a player onto another to swap them — or tap one, then the other. Team{" "}
-                {unit} updates as you go.
-              </>
-            )}
-          </p>
+          {!locked && (
+            <p className="-mt-2 text-xs text-zinc-500">
+              {picked ? (
+                <span className="text-[var(--lg-glow)]">
+                  Now pick who to swap with — or tap the same player to cancel.
+                </span>
+              ) : (
+                <>
+                  Drag a player onto another to swap them — or tap one, then the other. Team{" "}
+                  {unit} updates as you go.
+                </>
+              )}
+            </p>
+          )}
 
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {result.teams.map((team, i) => {
@@ -1712,29 +1978,31 @@ export default function Balancer() {
                       return (
                         <li
                           key={p.id}
-                          draggable
+                          draggable={!locked}
                           onClick={() => pickPlayer(team.id, p.id)}
-                          onDragStart={() => setDragging({ teamId: team.id, playerId: p.id })}
+                          onDragStart={() => !locked && setDragging({ teamId: team.id, playerId: p.id })}
                           onDragEnd={() => {
                             setDragging(null);
                             setDragOver(null);
                           }}
                           onDragOver={(e) => {
+                            if (locked) return;
                             e.preventDefault();
                             e.stopPropagation(); // target this player, not the team
                             setDragOver({ teamId: team.id, playerId: p.id });
                           }}
                           onDrop={(e) => {
+                            if (locked) return;
                             e.preventDefault();
                             e.stopPropagation();
                             if (dragging) applyDrop(dragging, { teamId: team.id, playerId: p.id });
                             setDragging(null);
                             setDragOver(null);
                           }}
-                          title="Drag onto another player to swap — or tap two players"
-                          className={`flex cursor-grab items-center justify-between gap-2 rounded-md px-1 py-0.5 text-[13px] transition-colors active:cursor-grabbing ${
-                            isDragging ? "opacity-40" : ""
-                          } ${
+                          title={locked ? undefined : "Drag onto another player to swap — or tap two players"}
+                          className={`flex items-center justify-between gap-2 rounded-md px-1 py-0.5 text-[13px] transition-colors ${
+                            locked ? "" : "cursor-grab active:cursor-grabbing"
+                          } ${isDragging ? "opacity-40" : ""} ${
                             isPicked
                               ? "bg-[var(--accent)]/25 ring-1 ring-[var(--accent)]"
                               : isTarget

@@ -38,8 +38,16 @@ export default async function RootLayout({
         {authed && (
           <header className="sticky top-0 z-20 panel border-x-0 border-t-0">
             <nav className="mx-auto flex w-full max-w-6xl items-center gap-6 px-6 py-3.5">
-              <Link href="/" className="flex items-baseline gap-2 font-semibold tracking-tight">
-                <span className="text-lg">Dota Balancer</span>
+              <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/Loungee.webp"
+                  alt="Loungee"
+                  width={30}
+                  height={30}
+                  className="h-[30px] w-[30px] rounded-md object-contain"
+                />
+                <span className="text-lg">LounGee</span>
               </Link>
               <div className="ml-auto flex items-center gap-1 text-sm">
                 <Link
@@ -66,6 +74,11 @@ export default async function RootLayout({
           </header>
         )}
         {children}
+        <footer className="mt-auto border-t border-[var(--panel-border)] px-6 py-5">
+          <p className="mx-auto w-full max-w-6xl text-center text-xs text-zinc-500">
+            Made with <span className="text-red-400">❤︎</span> by Euruuu
+          </p>
+        </footer>
       </body>
     </html>
   );

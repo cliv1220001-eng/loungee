@@ -38,15 +38,31 @@ const RANK_ACCENTS: Record<string, string> = {
   Recruit: "#6a6a72",
 };
 
-/** Current year-month (YYYY-MM) in local time. */
+/** The current year and month in PHILIPPINE time, so "this month" matches the
+ *  PH-windowed leaderboard data (and never disagrees near a month boundary). */
+function phNow(): { year: number; month: number } {
+  // en-CA gives ISO-ish YYYY-MM-DD in the requested zone.
+  const [y, m] = new Date()
+    .toLocaleDateString("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit" })
+    .split("-")
+    .map(Number);
+  return { year: y, month: m };
+}
+
+/** Current year-month (YYYY-MM) in Philippine time. */
 function thisMonth(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const { year, month } = phNow();
+  return `${year}-${String(month).padStart(2, "0")}`;
 }
 
 function monthLabel(m: string): string {
   const [y, mo] = m.split("-").map(Number);
-  return new Date(y, (mo ?? 1) - 1, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
+  // Build at noon UTC to avoid any date rollover, and label in PH.
+  return new Date(Date.UTC(y, (mo ?? 1) - 1, 1, 12)).toLocaleString("en-US", {
+    timeZone: "Asia/Manila",
+    month: "long",
+    year: "numeric",
+  });
 }
 
 function signed(n: number): string {
@@ -190,8 +206,8 @@ export default function LeaderboardPage() {
   const subtitle = useMemo(
     () =>
       monthly
-        ? `LR earned in ${monthLabel(month)}`
-        : "Every registered player, ranked by all-time LR.",
+        ? `LR earned during ${monthLabel(month)}`
+        : "",
     [monthly, month]
   );
 
@@ -202,7 +218,7 @@ export default function LeaderboardPage() {
       }`}
     >
       <header className="flex flex-col gap-2">
-        <h1 className="gradient-text text-4xl font-extrabold tracking-tight">LoungeE Rating</h1>
+        <h1 className="gradient-text text-4xl font-extrabold tracking-tight">Loungee Rating</h1>
         <p className="text-zinc-400">{subtitle}</p>
       </header>
 

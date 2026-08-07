@@ -225,3 +225,15 @@ body {
 .bracket-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--accent);
 }
+
+/* Roster tier columns — a thin, unobtrusive vertical scrollbar. */
+.tier-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.tier-scroll::-webkit-scrollbar-thumb {
+  background: var(--panel-border);
+  border-radius: 999px;
+}
+.tier-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
