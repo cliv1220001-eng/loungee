@@ -564,6 +564,7 @@ function Balances() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [canEdit, setCanEdit] = useState(false);
+  const [hideZeros, setHideZeros] = useState(true);
   const [adjust, setAdjust] = useState<{ email: string; delta: string; note: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -582,12 +583,19 @@ function Balances() {
     void load();
   }, [load]);
 
+  // Header stats across ALL players (not affected by search/hide filters).
+  const totalCoins = useMemo(() => players.reduce((s, p) => s + p.coins, 0), [players]);
+  const holders = useMemo(() => players.filter((p) => p.coins !== 0).length, [players]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    // Sort by balance desc so the biggest holders read first (like the sheet).
-    const list = q ? players.filter((p) => p.ign.toLowerCase().includes(q)) : players;
+    let list = q ? players.filter((p) => p.ign.toLowerCase().includes(q)) : players;
+    // Hide the wall of zeros by default so players who actually hold coins pop.
+    // A search always shows matches regardless of the toggle.
+    if (hideZeros && !q) list = list.filter((p) => p.coins !== 0);
+    // Biggest holders first.
     return [...list].sort((a, b) => b.coins - a.coins);
-  }, [players, search]);
+  }, [players, search, hideZeros]);
 
   async function saveAdjust() {
     if (!adjust) return;
@@ -604,8 +612,37 @@ function Balances() {
     await load();
   }
 
+  const zeroCount = players.length - holders;
+
   return (
     <section className="flex flex-col gap-4">
+      {/* Header stats */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <div className="panel rounded-xl px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+            Coins in circulation
+          </div>
+          <div className="text-xl font-extrabold tabular-nums text-[var(--lg-glow)]">
+            {totalCoins.toLocaleString()} 🪙
+          </div>
+        </div>
+        <div className="panel rounded-xl px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+            Holders
+          </div>
+          <div className="text-xl font-extrabold tabular-nums text-zinc-100">
+            {holders}
+            <span className="text-sm font-medium text-zinc-500"> / {players.length}</span>
+          </div>
+        </div>
+        <div className="panel col-span-2 flex items-center rounded-xl px-4 py-3 sm:col-span-1">
+          <span className="text-xs text-zinc-500">
+            {canEdit ? "Click a player to adjust their balance." : "Read-only — owners edit balances."}
+          </span>
+        </div>
+      </div>
+
+      {/* Controls */}
       <div className="flex flex-wrap items-center gap-3">
         <input
           value={search}
@@ -613,52 +650,72 @@ function Balances() {
           placeholder="Search IGN…"
           className="field w-full max-w-xs rounded-lg px-3 py-2 text-sm"
         />
-        <span className="text-xs text-zinc-500">
-          {filtered.length} player{filtered.length === 1 ? "" : "s"}
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-400">
+          <input
+            type="checkbox"
+            checked={hideZeros}
+            onChange={(e) => setHideZeros(e.target.checked)}
+            className="accent-[var(--accent)]"
+          />
+          Hide 0 balances{zeroCount > 0 && <span className="text-zinc-600">({zeroCount})</span>}
+        </label>
+        <span className="ml-auto text-xs text-zinc-500">
+          {filtered.length} shown
         </span>
-        {!canEdit && (
-          <span className="text-xs text-zinc-600">· read-only (owners can edit balances)</span>
-        )}
       </div>
 
       {loading ? (
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : filtered.length === 0 ? (
-        <p className="panel rounded-2xl px-6 py-10 text-center text-sm text-zinc-500">No players.</p>
+        <p className="panel rounded-2xl px-6 py-10 text-center text-sm text-zinc-500">
+          {players.length === 0 ? "No players." : "No players with coins — untick “Hide 0 balances” to see everyone."}
+        </p>
       ) : (
-        // Dense, spreadsheet-style grid: many player/balance pairs across the
-        // width. Each cell is clickable to adjust (owners only). Negatives red.
-        <div className="panel grid grid-cols-2 gap-x-4 gap-y-0.5 rounded-2xl p-3 text-sm sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {filtered.map((p) => {
+        // Clean card grid: one card per player, coins emphasized, zeros dimmed,
+        // top-3 accented. Click a card to adjust (owners only).
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {filtered.map((p, i) => {
             const neg = p.coins < 0;
-            const cell = (
+            const zero = p.coins === 0;
+            const rank = search.trim() === "" && !zero ? i + 1 : null;
+            const medal = rank === 1 ? "#e0b64a" : rank === 2 ? "#c0c0cc" : rank === 3 ? "#c08a5a" : null;
+            const card = (
               <div
-                className={`flex items-baseline justify-between gap-2 rounded px-2 py-1 ${
-                  canEdit ? "cursor-pointer hover:bg-white/5" : ""
-                }`}
+                className={`panel flex items-center gap-3 rounded-xl px-3.5 py-2.5 transition-all ${
+                  canEdit ? "cursor-pointer hover:-translate-y-0.5 hover:ring-1 hover:ring-[var(--accent)]" : ""
+                } ${zero ? "opacity-45" : ""}`}
+                style={medal ? { borderColor: medal } : undefined}
               >
-                <span className="truncate font-medium text-zinc-300" title={p.ign || p.email}>
+                {rank != null && (
+                  <span
+                    className="w-5 shrink-0 text-center text-xs font-bold tabular-nums"
+                    style={{ color: medal ?? "var(--muted, #71717a)" }}
+                  >
+                    {rank}
+                  </span>
+                )}
+                <span
+                  className="min-w-0 flex-1 truncate font-semibold text-zinc-100"
+                  title={p.ign || p.email}
+                >
                   {p.ign || p.email}
                 </span>
                 <span
-                  className={`shrink-0 font-bold tabular-nums ${
-                    neg ? "text-red-400" : "text-[var(--lg-glow)]"
+                  className={`shrink-0 text-base font-extrabold tabular-nums ${
+                    neg ? "text-red-400" : zero ? "text-zinc-500" : "text-[var(--lg-glow)]"
                   }`}
                 >
                   {p.coins.toLocaleString()}
+                  <span className="ml-0.5 text-xs">🪙</span>
                 </span>
               </div>
             );
             return canEdit ? (
-              <button
-                key={p.email}
-                onClick={() => setAdjust({ email: p.email, delta: "", note: "" })}
-                className="text-left"
-              >
-                {cell}
+              <button key={p.email} onClick={() => setAdjust({ email: p.email, delta: "", note: "" })} className="text-left">
+                {card}
               </button>
             ) : (
-              <div key={p.email}>{cell}</div>
+              <div key={p.email}>{card}</div>
             );
           })}
         </div>
