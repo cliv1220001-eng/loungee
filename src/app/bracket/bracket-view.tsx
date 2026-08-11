@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { startingLr } from "@/lib/lr";
@@ -312,6 +312,29 @@ export default function BracketView() {
       .catch(() => {});
     return () => ctrl.abort();
   }, [runId, stake, dbLoaded, resolved, bracket, teams, teamsById, refreshLr]);
+
+  // Auto-settle any coin bets on a match the moment its winner is known. The
+  // settle endpoint is idempotent (only touches OPEN bets), so calling it on
+  // every resolve is safe and self-correcting. We track which (match → winner)
+  // pairs we've already settled this session to avoid redundant requests; if the
+  // admin edits a result, the new winner is a new pair and re-settles.
+  const settledRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!runId || !dbLoaded || !bracket) return;
+    for (const rm of Object.values(resolved)) {
+      if (!rm.decided || rm.a.teamId == null || rm.b.teamId == null) continue;
+      const winningTeamId = rm.winner === "a" ? rm.a.teamId : rm.b.teamId;
+      if (winningTeamId == null) continue;
+      const key = `${rm.id}:${winningTeamId}`;
+      if (settledRef.current.has(key)) continue;
+      settledRef.current.add(key);
+      void fetch("/api/bets/settle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId, matchId: rm.id, winningTeamId }),
+      }).catch(() => {});
+    }
+  }, [runId, dbLoaded, bracket, resolved]);
 
   // NO save-on-effect. Every save is EXPLICIT (pick / reshuffle / changeFormat)
   // so that loading the bracket from the DB — which sets seed/format/winners —

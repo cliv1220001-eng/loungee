@@ -8,6 +8,21 @@ export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const isLoginPage = pathname === "/login";
 
+  // PUBLIC cash-in: the /cashin page and the bare submit endpoint are the ONLY
+  // things reachable without login. Everything else under /api/cashin (the admin
+  // approve/reject/list routes) stays gated — and those handlers re-check auth
+  // themselves (isAdminRequest) as defense in depth. Keep this list tight: it is
+  // the one deliberate hole in the login wall.
+  const isPublicPath =
+    pathname === "/cashin" ||
+    (pathname === "/api/cashin" && request.method === "POST") ||
+    // IGN autocomplete for the public cash-in form — GET only, IGN strings only.
+    (pathname === "/api/cashin/lookup" && request.method === "GET");
+  // NOTE: cash-out is ADMIN-ONLY (recorded by an admin), so it stays gated.
+  if (isPublicPath) {
+    return NextResponse.next();
+  }
+
   // Unauthenticated → send to login (remember where they were headed).
   if (!authed && !isLoginPage) {
     const url = request.nextUrl.clone();

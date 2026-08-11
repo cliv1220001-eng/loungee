@@ -13,12 +13,23 @@ import {
   undo as draftUndo,
   type DraftState,
 } from "@/lib/draft";
+import {
+  BET_TOTAL_PLAYERS,
+  isComplete as betComplete,
+  pick as betPick,
+  startBetDraft,
+  toTeams as betToTeams,
+  undo as betUndo,
+  type BetDraftState,
+  type CoinSide,
+} from "@/lib/bet-draft";
 import DraftReveal from "./draft-reveal";
+import CoinToss from "./coin-toss";
 import TeamReel from "./team-reel";
 import ForestRanger from "./forest-ranger";
 import { startingLr } from "@/lib/lr";
 import { usePersistentState } from "@/lib/store";
-import { ROLE_LABELS, type Role, type Team } from "@/lib/types";
+import { ROLE_LABELS, type Player, type Role, type Team } from "@/lib/types";
 
 interface DraftPlayer {
   id: string;
@@ -53,15 +64,16 @@ function registerPlayers(players: ReturnType<typeof registryFromTeams>): void {
 }
 
 // Strategies. What they weight by (LR or MMR) is chosen separately — see BASES.
-// "draft" is not a server balancing mode: it runs entirely client-side as an
-// interactive draft (see @/lib/draft) and produces teams the same shape.
-type PageMode = BalanceMode | "draft";
+// "draft" and "bet" are not server balancing modes: they run entirely client-side
+// as interactive drafts (see @/lib/draft, @/lib/bet-draft) and produce teams the
+// same shape.
+type PageMode = BalanceMode | "draft" | "bet";
 
 const MODES: { key: PageMode; label: string; hint: string }[] = [
   { key: "mmr", label: "Balance", hint: "Closest team totals" },
   { key: "role", label: "Spread Roles", hint: "Even roles + balanced" },
-  { key: "random", label: "Random", hint: "Shuffle without weighting" },
   { key: "draft", label: "Captain's Draft", hint: "Captains pick, snake order" },
+  { key: "bet", label: "Captain's Draft (Bet Game)", hint: "Coin toss, 10 players, 1-1 picks" },
 ];
 
 /** The measure of strength the balancer weights by (ignored by Random). */
@@ -469,6 +481,30 @@ export default function Balancer({
     accent: string;
   } | null>(null);
 
+  // --- Captain's Draft (Bet Game) --------------------------------------------
+  // Coin toss decides who picks first, then captains alternate 1-1 picking the
+  // lowest-rated remaining players. Exactly 10 players (2 captains + 8 pool).
+  const [betDraft, setBetDraft] = useState<BetDraftState | null>(null);
+  /** While set, the coin-toss overlay is up; `first` is filled in once decided. */
+  const [coinToss, setCoinToss] = useState<{ players: Player[] } | null>(null);
+  /** A fair 50/50, generated when the toss opens so render stays pure. */
+  const [coinFlip, setCoinFlip] = useState<CoinSide>("a");
+
+  // Side bets on a 2-team lobby result. Coin players + existing bets for this
+  // tournament, plus the in-progress bet draft (player / team / stake).
+  const [coinPlayers, setCoinPlayers] = useState<{ email: string; ign: string; coins: number }[]>([]);
+  const [sideBets, setSideBets] = useState<
+    { id: string; email: string; ign: string; team_id: number; stake: number; status: string; payout: number }[]
+  >([]);
+  // A matched side bet: one player on each team, same stake. Winner takes the
+  // loser's coins. `playerA` backs the first team, `playerB` the second.
+  const [sideBetDraft, setSideBetDraft] = useState<{
+    playerA: string;
+    playerB: string;
+    stake: string;
+  }>({ playerA: "", playerB: "", stake: "" });
+  const [sideBetMsg, setSideBetMsg] = useState<string | null>(null);
+
   // True once the roster differs from what was generated.
   const edited = useMemo(() => {
     if (!result || !generated) return false;
@@ -526,6 +562,63 @@ export default function Balancer({
       window.removeEventListener("focus", sync);
     };
   }, [currentId]);
+
+  // --- Side bets on a 2-team result -------------------------------------------
+  // A side bet is an unlimited-stake wager on which team wins. It attaches to this
+  // tournament's final match (wb-r0-m0 for a 2-team bracket) and auto-settles when
+  // the bracket records the winner — the same path normal coin bets use.
+  const SIDE_BET_MATCH_ID = "wb-r0-m0";
+
+  const refreshSideBets = useCallback(async () => {
+    if (!currentId) return;
+    try {
+      const [pRes, bRes] = await Promise.all([
+        fetch("/api/coins"),
+        fetch(`/api/bets?runId=${encodeURIComponent(currentId)}`),
+      ]);
+      const pBody = (await pRes.json().catch(() => ({}))) as {
+        players?: { email: string; ign: string; coins: number }[];
+      };
+      const bBody = (await bRes.json().catch(() => ({}))) as {
+        bets?: {
+          id: string;
+          email: string;
+          ign: string;
+          match_id: string;
+          team_id: number;
+          stake: number;
+          kind: string;
+          status: string;
+          payout: number;
+        }[];
+      };
+      setCoinPlayers(pBody.players ?? []);
+      setSideBets(
+        (bBody.bets ?? []).filter((b) => b.kind === "side" && b.match_id === SIDE_BET_MATCH_ID)
+      );
+    } catch {
+      // best-effort — the panel just shows what it last had
+    }
+  }, [currentId]);
+
+  // Load side bets whenever a 2-team result is on screen (Bet Game / any lobby),
+  // so the side-bet panel shows current balances + existing wagers.
+  const sideBetsActive = Boolean(result) && showTeams && effectiveKind === "lobby";
+  useEffect(() => {
+    if (!sideBetsActive || !currentId) return;
+    // Genuine data load when the 2-team result appears; setState is inside the
+    // async body of refreshSideBets, not synchronous here.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshSideBets();
+  }, [sideBetsActive, currentId, refreshSideBets]);
+
+  // Coin balance per player email, for showing who can side-bet on the results
+  // screen. Undefined until the coin data loads (or if the player has no wallet).
+  const coinsByEmail = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of coinPlayers) m.set(p.email, p.coins);
+    return m;
+  }, [coinPlayers]);
 
   // "Edit teams" on the bracket returns here as /?t=<id>. Restore that exact
   // tournament from the DB (teams + saved advancements) unless it's already the
@@ -614,6 +707,22 @@ export default function Balancer({
   const numTeams = Math.floor(playerCount / TEAM_SIZE);
   const remainder = playerCount % TEAM_SIZE;
   const canGenerate = numTeams >= 2;
+  // Bet Game needs EXACTLY 10 players (2 captains + 8 pool → two teams of 5).
+  const canBet = playerCount === BET_TOTAL_PLAYERS;
+  // The mode-appropriate "can I start?" gate for the main action button.
+  const canStart = mode === "bet" ? canBet : canGenerate;
+
+  // The two captains a Bet Game would use: the top 2 ready players by the active
+  // basis. Drives the coin-toss captain names before the draft actually starts.
+  const betCaptains = useMemo(() => {
+    if (ready.length < 2) return null;
+    const rank = (r: DraftPlayer) =>
+      basis === "mmr"
+        ? Math.round(Number(r.mmr))
+        : lrOf(Math.round(Number(r.mmr)), r.email);
+    const top = [...ready].sort((a, b) => rank(b) - rank(a));
+    return { a: { name: top[0].name.trim() }, b: { name: top[1].name.trim() } };
+  }, [ready, basis, lrOf]);
 
   // Captain's Draft handlers — defined here so they read the derived roster
   // values (`ready`, `numTeams`, `canGenerate`) after those exist.
@@ -673,7 +782,156 @@ export default function Balancer({
     setDraft(null);
   }
 
+  // --- Captain's Draft (Bet Game) handlers -----------------------------------
+
+  /** Open the coin toss for a Bet Game. Requires exactly 10 ready players. */
+  function beginBetGame() {
+    if (!canBet) return;
+    const players: Player[] = ready.map((r) => ({
+      id: r.id,
+      name: r.name.trim(),
+      mmr: Math.round(Number(r.mmr)),
+      role: r.role,
+      email: (r.email ?? "").trim().toLowerCase() || null,
+    }));
+    // Decide the fair 50/50 up front so the toss animation stays pure.
+    setCoinFlip(Math.random() < 0.5 ? "a" : "b");
+    setCoinToss({ players });
+    setSession((s) => ({ ...s, result: null, generated: null, resultBasis: basis }));
+    setRevealed(false);
+    setGenError(null);
+  }
+
+  /** Coin toss resolved — start the alternating draft with the winner first. */
+  function startBetFromToss(winner: CoinSide) {
+    const players = coinToss?.players;
+    setCoinToss(null);
+    if (!players) return;
+    const weight = (p: { mmr: number; email?: string | null }) =>
+      basis === "mmr" ? p.mmr : lrOf(p.mmr, p.email);
+    setBetDraft(startBetDraft(players, weight, winner));
+  }
+
+  /** Organizer picks a card in the Bet Game (with the same reveal celebration). */
+  function takeBetPick(playerId: string) {
+    if (!betDraft) return;
+    const chosen = betDraft.offer.find((p) => p.id === playerId);
+    if (!chosen) return;
+    const teamIndex = betDraft.turn;
+    setReveal({
+      key: betDraft.history.length,
+      name: chosen.name,
+      role: chosen.role,
+      rating: weightOf(chosen),
+      teamId: betDraft.teams[teamIndex]?.id ?? 0,
+      accent: TEAM_ACCENTS[teamIndex % TEAM_ACCENTS.length],
+    });
+    setBetDraft(betPick(betDraft, playerId));
+    window.setTimeout(() => setReveal(null), 2000);
+  }
+
+  /** Push the finished Bet Game draft into the normal 2-team result flow. */
+  function finishBetGame() {
+    if (!betDraft) return;
+    const teams = betToTeams(betDraft);
+    const totals = teams.map((t) => t.players.reduce((s, p) => s + weightOf(p), 0));
+    const res: BalanceResult = {
+      teams,
+      spread: totals.length ? Math.max(...totals) - Math.min(...totals) : 0,
+    };
+    setSession((s) => ({ ...s, result: res, generated: res, resultBasis: basis }));
+    setRevealed(true);
+    setBetDraft(null);
+  }
+
+  /** Abandon an in-progress Bet Game (draft or coin toss). */
+  function cancelBetGame() {
+    setBetDraft(null);
+    setCoinToss(null);
+  }
+
+  async function placeSideBet() {
+    setSideBetMsg(null);
+    const { playerA, playerB, stake } = sideBetDraft;
+    const teamA = result?.teams[0]?.id;
+    const teamB = result?.teams[1]?.id;
+    if (!currentId) {
+      setSideBetMsg("Save the tournament first.");
+      return;
+    }
+    if (!playerA || !playerB) {
+      setSideBetMsg("Pick a player for each team.");
+      return;
+    }
+    if (playerA === playerB) {
+      setSideBetMsg("Pick two different players.");
+      return;
+    }
+    if (!(Number(stake) > 0)) {
+      setSideBetMsg("Enter a stake.");
+      return;
+    }
+    if (teamA == null || teamB == null) {
+      setSideBetMsg("Need two teams to match a side bet.");
+      return;
+    }
+    // Both players must have the stake in coins (the server enforces this too, but
+    // check here so we can name WHICH player is short before hitting the API).
+    const balOf = (email: string) => coinPlayers.find((p) => p.email === email)?.coins ?? 0;
+    const ignOf = (email: string) => coinPlayers.find((p) => p.email === email)?.ign ?? email;
+    const need = Number(stake);
+    if (balOf(playerA) < need) {
+      setSideBetMsg(`${ignOf(playerA)} only has ${balOf(playerA)} coins.`);
+      return;
+    }
+    if (balOf(playerB) < need) {
+      setSideBetMsg(`${ignOf(playerB)} only has ${balOf(playerB)} coins.`);
+      return;
+    }
+    // Persist the teams so the bracket can settle by the same id, then record the
+    // matched pair (both legs) atomically.
+    await saveNow();
+    const res = await fetch("/api/bets/side", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runId: currentId,
+        matchId: SIDE_BET_MATCH_ID,
+        stake: Number(stake),
+        playerA,
+        teamA,
+        playerB,
+        teamB,
+      }),
+    });
+    if (!res.ok) {
+      const b = (await res.json().catch(() => ({}))) as { error?: string };
+      setSideBetMsg(b.error ?? "Bet failed.");
+      return;
+    }
+    setSideBetDraft({ playerA: "", playerB: "", stake: "" });
+    await refreshSideBets();
+  }
+
   const teamNote: { tone: "info" | "warn" | "ok"; text: string } = (() => {
+    // Bet Game has its own fixed-size rule: exactly 10 players, no more, no less.
+    if (mode === "bet") {
+      if (playerCount === BET_TOTAL_PLAYERS) {
+        return { tone: "ok", text: `Ready — 2 captains + 8 to draft.` };
+      }
+      if (playerCount < BET_TOTAL_PLAYERS) {
+        const need = BET_TOTAL_PLAYERS - playerCount;
+        return {
+          tone: "warn",
+          text: `Bet Game needs exactly ${BET_TOTAL_PLAYERS} players — add ${need} more.`,
+        };
+      }
+      const over = playerCount - BET_TOTAL_PLAYERS;
+      return {
+        tone: "warn",
+        text: `Bet Game takes exactly ${BET_TOTAL_PLAYERS} players — remove ${over}.`,
+      };
+    }
     if (playerCount === 0) {
       return { tone: "info", text: "Add players to get started — 5 per team." };
     }
@@ -1326,8 +1584,8 @@ export default function Balancer({
                 <span className="flex flex-col">
                   <span className="font-semibold">{m.label}</span>
                   <span className="text-xs text-zinc-400">
-                    {m.key === "random"
-                      ? m.hint
+                    {m.key === "bet"
+                      ? "Coin toss · 10 players"
                       : m.key === "draft"
                         ? `Top ${basis === "lr" ? "LR" : "MMR"} captains`
                         : `${m.hint} · by ${basis === "lr" ? "LR" : "MMR"}`}
@@ -1367,8 +1625,8 @@ export default function Balancer({
               ))}
             </div>
             <span className="text-xs text-zinc-500">
-              {mode === "random"
-                ? "Random ignores skill entirely."
+              {mode === "bet"
+                ? `Captains are the top 2 ${basis === "lr" ? "LR" : "MMR"}; cards offer the lowest ${basis === "lr" ? "LR" : "MMR"} first.`
                 : mode === "draft"
                   ? `Captains are the top ${basis === "lr" ? "LR" : "MMR"}; cards show ${basis === "lr" ? "LR" : "MMR"}.`
                   : BASES.find((b) => b.key === basis)?.hint}
@@ -1579,20 +1837,26 @@ export default function Balancer({
               </button>
             )}
             <button
-              onClick={mode === "draft" ? beginDraft : generate}
-              disabled={!canGenerate || shuffling || locked}
+              onClick={
+                mode === "bet" ? beginBetGame : mode === "draft" ? beginDraft : generate
+              }
+              disabled={!canStart || shuffling || locked}
               title={
                 locked
                   ? "Teams are locked in the bracket — unlock to reshuffle."
-                  : canGenerate
-                    ? `${
-                        mode === "random"
-                          ? "Random"
-                          : mode === "draft"
-                            ? `Captain's Draft by ${basis === "lr" ? "LR" : "MMR"}`
-                            : `Balance by ${basis === "lr" ? "LR" : "MMR"}`
-                      } · ${numTeams} teams`
-                    : "Need at least 2 full teams"
+                  : mode === "bet"
+                    ? canBet
+                      ? "Coin toss, then draft"
+                      : `Bet Game needs exactly ${BET_TOTAL_PLAYERS} players`
+                    : canGenerate
+                      ? `${
+                          mode === "random"
+                            ? "Random"
+                            : mode === "draft"
+                              ? `Captain's Draft by ${basis === "lr" ? "LR" : "MMR"}`
+                              : `Balance by ${basis === "lr" ? "LR" : "MMR"}`
+                        } · ${numTeams} teams`
+                      : "Need at least 2 full teams"
               }
               className="btn-neon flex items-center gap-2 rounded-full px-6 py-2.5 text-sm"
             >
@@ -1601,13 +1865,17 @@ export default function Balancer({
               )}
               {shuffling
                 ? "Shuffling…"
-                : mode === "draft"
-                  ? draft
-                    ? "Restart Draft"
-                    : "Start Draft"
-                  : result
-                    ? "Reshuffle"
-                    : "Generate Teams"}
+                : mode === "bet"
+                  ? betDraft || coinToss
+                    ? "Restart Bet Game"
+                    : "Start Bet Game"
+                  : mode === "draft"
+                    ? draft
+                      ? "Restart Draft"
+                      : "Start Draft"
+                    : result
+                      ? "Reshuffle"
+                      : "Generate Teams"}
             </button>
           </div>
         </div>
@@ -1867,6 +2135,191 @@ export default function Balancer({
         );
       })()}
 
+      {/* Coin toss overlay — decides (or lets the organizer choose) who drafts
+          first in a Bet Game, then hands off to startBetFromToss. */}
+      {coinToss && (
+        <CoinToss
+          captainA={betCaptains?.a.name ?? "Team 1"}
+          captainB={betCaptains?.b.name ?? "Team 2"}
+          accentA={TEAM_ACCENTS[0]}
+          accentB={TEAM_ACCENTS[1]}
+          flipResult={coinFlip}
+          onDone={startBetFromToss}
+        />
+      )}
+
+      {/* Captain's Draft (Bet Game) board — 3 lowest-rated cards, 1-1 picks. */}
+      {betDraft && (() => {
+        const done = betComplete(betDraft);
+        const onClockIdx = betDraft.turn;
+        const picksTotal = betDraft.teams.length * betDraft.teamSize - betDraft.teams.length;
+        return (
+          <section className="flex flex-col gap-5">
+            {/* Status bar */}
+            <div className="panel flex flex-wrap items-center gap-3 rounded-2xl p-4">
+              {done ? (
+                <div className="flex min-w-0 flex-col">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                    Draft complete
+                  </span>
+                  <span className="text-lg font-bold text-zinc-100">Both teams are full</span>
+                </div>
+              ) : (
+                <div className="flex min-w-0 flex-col">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                    On the clock
+                  </span>
+                  <span
+                    className="truncate text-lg font-bold"
+                    style={{ color: TEAM_ACCENTS[onClockIdx % TEAM_ACCENTS.length] }}
+                  >
+                    Team {betDraft.teams[onClockIdx]?.id} —{" "}
+                    {betDraft.teams[onClockIdx]?.captain.name}
+                  </span>
+                </div>
+              )}
+
+              <span className="text-sm text-zinc-400">
+                <span className="font-bold tabular-nums text-zinc-100">
+                  {betDraft.history.length}
+                </span>
+                {" / "}
+                <span className="tabular-nums">{picksTotal}</span> picked
+                <span className="ml-2 text-zinc-600">·</span>
+                <span className="ml-2 text-zinc-500">{betDraft.pool.length} left</span>
+              </span>
+
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  onClick={() => setBetDraft(betUndo(betDraft))}
+                  disabled={betDraft.history.length === 0}
+                  className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5 disabled:opacity-40"
+                >
+                  Undo
+                </button>
+                <button
+                  onClick={cancelBetGame}
+                  className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/5"
+                >
+                  Cancel
+                </button>
+                {done && (
+                  <button onClick={finishBetGame} className="btn-neon rounded-full px-6 py-2 text-sm">
+                    Use these teams →
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Available players — the whole remaining pool, lowest-rated first */}
+            {!done && (
+              <div className="flex flex-col gap-3">
+                <p className="text-sm text-zinc-400">
+                  Pick a player for{" "}
+                  <span
+                    className="font-semibold"
+                    style={{ color: TEAM_ACCENTS[onClockIdx % TEAM_ACCENTS.length] }}
+                  >
+                    Team {betDraft.teams[onClockIdx]?.id}
+                  </span>{" "}
+                  · {betDraft.pool.length} available.
+                </p>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                  {betDraft.offer.map((p, i) => (
+                    <button
+                      key={p.id}
+                      onClick={() => takeBetPick(p.id)}
+                      disabled={reveal !== null}
+                      className="panel animate-pop group flex flex-col items-center gap-1.5 rounded-xl p-4 text-center transition-all hover:-translate-y-0.5 hover:ring-1 hover:ring-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
+                      style={{ animationDelay: `${i * 50}ms` }}
+                    >
+                      <span className="truncate text-base font-bold text-zinc-100">{p.name}</span>
+                      <span className="text-2xl font-extrabold tabular-nums text-[var(--lg-glow)]">
+                        {weightOf(p)}
+                        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                          {unit}
+                        </span>
+                      </span>
+                      <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] font-semibold text-zinc-300">
+                        {p.role ? ROLE_LABELS[p.role] : "Any role"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Live teams */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {betDraft.teams.map((t, i) => {
+                const accent = TEAM_ACCENTS[i % TEAM_ACCENTS.length];
+                const onClock = !done && betDraft.turn === i;
+                const total = t.players.reduce((s, p) => s + weightOf(p), 0);
+                return (
+                  <div
+                    key={t.id}
+                    className={`panel rounded-xl p-3.5 transition-all ${
+                      onClock ? "ring-1 ring-[var(--accent)]" : ""
+                    }`}
+                    style={{ borderColor: accent }}
+                  >
+                    <div className="mb-2 flex items-baseline justify-between gap-1">
+                      <h2 className="text-base font-extrabold" style={{ color: accent }}>
+                        Team {t.id}
+                        {t.side === betDraft.first && (
+                          <span className="ml-2 rounded-full bg-[var(--accent)]/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[var(--lg-glow)]">
+                            Won toss
+                          </span>
+                        )}
+                      </h2>
+                      <span className="text-[11px] font-bold tabular-nums text-zinc-200">
+                        {total} {unit}
+                      </span>
+                    </div>
+                    <ul className="flex flex-col gap-1.5">
+                      {t.players.map((p) => (
+                        <li key={p.id} className="flex items-center justify-between gap-2 text-[13px]">
+                          <span className="flex items-center gap-1.5 truncate">
+                            {p.id === t.captain.id && (
+                              <span
+                                title="Captain"
+                                className="shrink-0 rounded bg-[var(--accent)]/20 px-1 text-[10px] font-bold text-[var(--lg-glow)]"
+                              >
+                                C
+                              </span>
+                            )}
+                            {p.role && (
+                              <span
+                                title={ROLE_LABELS[p.role]}
+                                className="shrink-0 rounded bg-white/10 px-1 text-[10px] font-bold tabular-nums text-zinc-300"
+                              >
+                                {p.role}
+                              </span>
+                            )}
+                            <span className="truncate font-medium">{p.name}</span>
+                          </span>
+                          <span className="shrink-0 tabular-nums text-zinc-400">{weightOf(p)}</span>
+                        </li>
+                      ))}
+                      {Array.from({ length: Math.max(0, betDraft.teamSize - t.players.length) }).map(
+                        (_, k) => (
+                          <li
+                            key={`empty-${k}`}
+                            className="rounded border border-dashed border-[var(--panel-border)] px-1 py-1 text-[13px] text-zinc-700"
+                          >
+                            —
+                          </li>
+                        )
+                      )}
+                    </ul>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })()}
+
       {/* Slot-machine reveal of freshly built teams. Names cycle in each slot
           and lock one by one, then it flips to the real results below. */}
       {result && reeling && !revealed && (
@@ -2116,6 +2569,25 @@ export default function Balancer({
                               </span>
                             )}
                             <span className="truncate font-medium">{p.name}</span>
+                            {/* Coin balance — shows who can side-bet. Red at 0. */}
+                            {sideBetsActive &&
+                              (() => {
+                                const key = (p.email ?? "").trim().toLowerCase();
+                                const bal = key ? coinsByEmail.get(key) : undefined;
+                                if (bal === undefined) return null;
+                                return (
+                                  <span
+                                    title={`${bal} coins`}
+                                    className={`shrink-0 rounded px-1 text-[10px] font-bold tabular-nums ${
+                                      bal <= 0
+                                        ? "bg-red-500/15 text-red-400"
+                                        : "bg-[var(--accent)]/15 text-[var(--lg-glow)]"
+                                    }`}
+                                  >
+                                    {bal.toLocaleString()}🪙
+                                  </span>
+                                );
+                              })()}
                           </span>
                           <span
                             title={
@@ -2135,6 +2607,158 @@ export default function Balancer({
               );
             })}
           </div>
+
+          {/* Side bets — a head-to-head between two players on opposite teams,
+              same stake. Winner takes the loser's coins. Settles when the bracket
+              records the winner. */}
+          {sideBetsActive && (() => {
+            const teamA = result.teams[0];
+            const teamB = result.teams[1];
+            const accentA = TEAM_ACCENTS[0];
+            const accentB = TEAM_ACCENTS[1];
+            const ignOf = (email: string) =>
+              coinPlayers.find((p) => p.email === email)?.ign ?? email;
+            const balOf = (email: string) =>
+              coinPlayers.find((p) => p.email === email)?.coins ?? 0;
+            // Live insufficient-balance check for the draft, to warn + disable
+            // before submitting. Both players must hold the stake.
+            const wantStake = Number(sideBetDraft.stake) || 0;
+            const shortA =
+              !!sideBetDraft.playerA && wantStake > 0 && balOf(sideBetDraft.playerA) < wantStake;
+            const shortB =
+              !!sideBetDraft.playerB && wantStake > 0 && balOf(sideBetDraft.playerB) < wantStake;
+            // Pair the individual side-bet legs back into head-to-head rows: one
+            // leg on teamA + one on teamB with the same stake = one matched bet.
+            const legsA = sideBets.filter((b) => b.team_id === teamA?.id);
+            const legsB = sideBets.filter((b) => b.team_id === teamB?.id);
+            const pairs: {
+              a: (typeof sideBets)[number];
+              b: (typeof sideBets)[number] | undefined;
+            }[] = [];
+            const usedB = new Set<string>();
+            for (const a of legsA) {
+              const match = legsB.find((x) => !usedB.has(x.id) && x.stake === a.stake);
+              if (match) usedB.add(match.id);
+              pairs.push({ a, b: match });
+            }
+            return (
+              <div className="panel flex flex-col gap-3 rounded-2xl p-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400">
+                    Side bets
+                  </h3>
+                  <span className="text-xs text-zinc-500">
+                    Head-to-head · winner takes the loser&apos;s coins · settles with the bracket
+                  </span>
+                </div>
+
+                {!currentId ? (
+                  <p className="text-xs text-amber-300">Save the tournament first to take bets.</p>
+                ) : (
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="flex flex-col gap-1 text-sm">
+                      <span className="text-xs font-semibold" style={{ color: accentA }}>
+                        On Team {teamA?.id}
+                      </span>
+                      <select
+                        value={sideBetDraft.playerA}
+                        onChange={(e) => setSideBetDraft((s) => ({ ...s, playerA: e.target.value }))}
+                        className="field rounded-lg px-2 py-1.5 text-sm"
+                      >
+                        <option value="">Player…</option>
+                        {coinPlayers.map((p) => (
+                          <option key={p.email} value={p.email}>
+                            {p.ign} ({p.coins.toLocaleString()} 🪙)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <span className="pb-2 text-xs font-bold text-zinc-600">vs</span>
+                    <label className="flex flex-col gap-1 text-sm">
+                      <span className="text-xs font-semibold" style={{ color: accentB }}>
+                        On Team {teamB?.id}
+                      </span>
+                      <select
+                        value={sideBetDraft.playerB}
+                        onChange={(e) => setSideBetDraft((s) => ({ ...s, playerB: e.target.value }))}
+                        className="field rounded-lg px-2 py-1.5 text-sm"
+                      >
+                        <option value="">Player…</option>
+                        {coinPlayers.map((p) => (
+                          <option key={p.email} value={p.email}>
+                            {p.ign} ({p.coins.toLocaleString()} 🪙)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="flex flex-col gap-1 text-sm">
+                      <span className="text-xs text-zinc-500">Stake each</span>
+                      <input
+                        value={sideBetDraft.stake}
+                        onChange={(e) =>
+                          setSideBetDraft((s) => ({ ...s, stake: e.target.value.replace(/[^0-9]/g, "") }))
+                        }
+                        placeholder="e.g. 100"
+                        inputMode="numeric"
+                        className="field w-28 rounded-lg px-2 py-1.5 text-sm tabular-nums"
+                      />
+                    </label>
+                    <button
+                      onClick={() => void placeSideBet()}
+                      disabled={shortA || shortB}
+                      title={shortA || shortB ? "A player doesn't have enough coins" : undefined}
+                      className="btn-neon rounded-full px-5 py-2 text-sm disabled:opacity-40"
+                    >
+                      Match bet
+                    </button>
+                    <button
+                      onClick={() => void refreshSideBets()}
+                      className="pb-2 text-xs font-semibold text-zinc-400 hover:text-white"
+                    >
+                      ↻
+                    </button>
+                  </div>
+                )}
+
+                {(shortA || shortB) && (
+                  <p className="text-xs font-medium text-amber-300">
+                    {shortA && `${ignOf(sideBetDraft.playerA)} has only ${balOf(sideBetDraft.playerA)} coins. `}
+                    {shortB && `${ignOf(sideBetDraft.playerB)} has only ${balOf(sideBetDraft.playerB)} coins.`}
+                  </p>
+                )}
+                {sideBetMsg && <p className="text-sm font-medium text-red-400">{sideBetMsg}</p>}
+
+                {pairs.length > 0 && (
+                  <ul className="flex flex-col divide-y divide-[var(--panel-border)]">
+                    {pairs.map(({ a, b }) => (
+                      <li key={a.id} className="flex flex-wrap items-center gap-2 py-1.5 text-sm">
+                        <span className="font-medium" style={{ color: accentA }}>
+                          {ignOf(a.email)}
+                        </span>
+                        <span className="text-zinc-500">vs</span>
+                        <span className="font-medium" style={{ color: accentB }}>
+                          {b ? ignOf(b.email) : "—"}
+                        </span>
+                        <span className="tabular-nums text-[var(--lg-glow)]">
+                          {a.stake.toLocaleString()} 🪙 each
+                        </span>
+                        {a.status === "won" || b?.status === "won" ? (
+                          <span className="text-xs font-semibold text-emerald-400">
+                            {a.status === "won" ? ignOf(a.email) : b ? ignOf(b.email) : ""} won +
+                            {a.stake.toLocaleString()} 🪙
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-sky-400/15 px-2 py-0.5 text-[11px] font-semibold text-sky-300">
+                            open
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })()}
         </section>
       )}
     </main>

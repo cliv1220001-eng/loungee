@@ -202,10 +202,49 @@ body {
   animation-delay: var(--delay, 0s);
 }
 
+/* Coin toss: the coin spins on X, decelerating, then holds on the winning face.
+   Duration is set inline via --spin-dur so the JS timer and the CSS agree. */
+@keyframes coin-spin {
+  0% {
+    transform: rotateX(0deg) scale(0.9);
+  }
+  10% {
+    transform: rotateX(360deg) scale(1.08);
+  }
+  100% {
+    /* Many turns, landing on a multiple of 360 so the chosen face is up. The
+       extra half-turn for "tails" is applied by a static rotation on the face. */
+    transform: rotateX(3600deg) scale(1);
+  }
+}
+
+/* The winner announcement pops in after the coin settles. */
+@keyframes coin-winner {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-coin-spin {
+  animation: coin-spin var(--spin-dur, 2.4s) cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  transform-style: preserve-3d;
+}
+
+.animate-coin-winner {
+  animation: coin-winner 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* Respect users who prefer less motion: keep the reveal, drop the movement. */
 @media (prefers-reduced-motion: reduce) {
   .animate-reveal-name,
-  .animate-reveal-backdrop {
+  .animate-reveal-backdrop,
+  .animate-coin-spin,
+  .animate-coin-winner {
     animation: none;
     opacity: 1;
   }

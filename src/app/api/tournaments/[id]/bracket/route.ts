@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import { getSessionUser } from "@/lib/auth";
+import { audit } from "@/lib/audit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -62,6 +64,16 @@ async function saveBracket(req: NextRequest, params: Ctx["params"]) {
       .update({ data: nextData })
       .eq("id", id);
     if (uErr) throw new Error(uErr.message);
+
+    // Audit only a NEWLY decided champion (the bracket saves on every pick, so we
+    // don't want a log line per click). Fires when the champion changes to a real
+    // team from a different / null previous value.
+    const prevChampion = (data as { championTeamId?: number | null }).championTeamId ?? null;
+    const newChampion = bracket.championTeamId ?? null;
+    if (newChampion != null && newChampion !== prevChampion) {
+      const actor = getSessionUser(req)?.username;
+      if (actor) void audit(actor, "tournament.champion", id, { teamId: newChampion });
+    }
 
     return NextResponse.json({ ok: true, saved: true });
   } catch (e) {

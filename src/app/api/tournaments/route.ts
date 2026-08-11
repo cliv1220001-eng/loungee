@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import { getSessionUser } from "@/lib/auth";
+import { audit } from "@/lib/audit";
 
 function errorResponse(e: unknown) {
   const message = e instanceof Error ? e.message : "Unknown error";
@@ -139,7 +142,7 @@ export async function GET() {
 }
 
 // Create a new tournament from the current balancer session.
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as { name?: string; data?: unknown };
     const name = (body.name ?? "").trim();
@@ -153,6 +156,8 @@ export async function POST(request: Request) {
       .select("id,name,created_at")
       .single();
     if (error) throw new Error(error.message);
+    const actor = getSessionUser(request)?.username;
+    if (actor) void audit(actor, "tournament.create", data.id, { name });
     return NextResponse.json({ tournament: data });
   } catch (e) {
     return errorResponse(e);

@@ -68,6 +68,18 @@ export default async function RootLayout({
                 >
                   Leaderboard
                 </Link>
+                <Link
+                  href="/betting"
+                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  Betting
+                </Link>
+                <Link
+                  href="/audit"
+                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  Audit
+                </Link>
                 <LogoutButton />
               </div>
             </nav>
