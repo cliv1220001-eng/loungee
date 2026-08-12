@@ -7,6 +7,8 @@ import {
   type BracketFormat,
   type ResolvedMatch,
 } from "@/lib/bracket";
+import TabPills from "../tab-pills";
+import { BalancesIcon, BetsIcon, CashInIcon, CashOutIcon } from "../icons";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,26 +107,17 @@ export default function BettingPage() {
         <h1 className="text-2xl font-bold tracking-tight text-zinc-100">Betting</h1>
       </header>
 
-      <div className="mb-6 inline-flex rounded-full bg-black/20 p-1">
-        {(
-          [
-            ["queue", "Cash-In Queue"],
-            ["cashout", "Cash Out"],
-            ["balances", "Balances"],
-            ["bets", "Bets"],
-          ] as [Tab, string][]
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            aria-pressed={tab === key}
-            className={`rounded-full px-5 py-1.5 text-sm font-semibold transition-colors ${
-              tab === key ? "btn-neon" : "text-zinc-400 hover:text-white"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="mb-6">
+        <TabPills
+          active={tab}
+          onChange={setTab}
+          tabs={[
+            { key: "queue", label: "Cash-In Queue", icon: <CashInIcon /> },
+            { key: "cashout", label: "Cash Out", icon: <CashOutIcon /> },
+            { key: "balances", label: "Balances", icon: <BalancesIcon /> },
+            { key: "bets", label: "Bets", icon: <BetsIcon /> },
+          ]}
+        />
       </div>
 
       {tab === "queue" && <CashInQueue />}
@@ -157,6 +150,7 @@ function CashOutQueue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
   // The record-a-cash-out form.
   const [email, setEmail] = useState("");
   const [amount, setAmount] = useState("");
@@ -311,42 +305,105 @@ function CashOutQueue() {
           No cash-outs recorded yet.
         </p>
       ) : (
-        <ul className="flex flex-col gap-3">
+        // Compact rows: small thumbnail + one line. Click to open the detail view.
+        <ul className="panel flex flex-col divide-y divide-[var(--panel-border)] rounded-2xl">
           {records.map((r) => (
-            <li key={r.id} className="panel flex flex-wrap items-center gap-3 rounded-2xl p-4">
-              {r.proofUrl ? (
-                <a href={r.proofUrl} target="_blank" rel="noreferrer" className="shrink-0">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
+            <li key={r.id}>
+              <button
+                onClick={() => setOpenId(r.id)}
+                className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.03]"
+              >
+                {r.proofUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={r.proofUrl}
-                    alt="Payout proof"
-                    className="h-16 w-16 rounded-lg border border-[var(--panel-border)] object-cover"
+                    alt=""
+                    className="h-10 w-10 shrink-0 rounded-md border border-[var(--panel-border)] object-cover"
                   />
-                </a>
-              ) : (
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg border border-dashed border-[var(--panel-border)] text-[10px] text-zinc-600">
-                  no proof
-                </div>
-              )}
-              <div className="flex min-w-0 flex-col">
-                <span className="text-lg font-bold text-zinc-100">{r.ign}</span>
-                <span className="text-xs text-zinc-500">
-                  {r.method ?? "—"} · {r.account ?? "no account"}
+                ) : (
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--panel-border)] text-[9px] text-zinc-600">
+                    none
+                  </div>
+                )}
+                <span className="min-w-0 flex-1 truncate font-semibold text-zinc-100">{r.ign}</span>
+                <span className="shrink-0 font-bold tabular-nums text-red-400">−{coins(r.amount)}</span>
+                <span className="hidden shrink-0 text-xs text-zinc-500 sm:inline">
+                  {r.method ?? "—"}
                 </span>
-              </div>
-              <span className="text-lg font-extrabold tabular-nums text-red-400">
-                −{coins(r.amount)}
-              </span>
-              <StatusChip status="paid" />
-              <span className="ml-auto text-right text-xs text-zinc-500">
-                by {r.reviewed_by ?? "—"}
-                <br />
-                {new Date(r.created_at).toLocaleString()}
-              </span>
+                <span className="hidden shrink-0 text-xs text-zinc-500 sm:inline">
+                  {new Date(r.created_at).toLocaleDateString()}
+                </span>
+                <span className="shrink-0 text-zinc-600">›</span>
+              </button>
             </li>
           ))}
         </ul>
       )}
+
+      {/* Detail view — full payout proof + info. */}
+      {(() => {
+        const r = records.find((x) => x.id === openId);
+        if (!r) return null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 sm:p-6"
+            onClick={() => setOpenId(null)}
+          >
+            <div
+              className="panel flex max-h-[90vh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-2xl p-5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex flex-col">
+                  <span className="text-xl font-bold text-zinc-100">{r.ign}</span>
+                  <span className="text-2xl font-extrabold tabular-nums text-red-400">
+                    −{coins(r.amount)}
+                  </span>
+                </div>
+                <StatusChip status="paid" />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="rounded-lg bg-white/[0.03] px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-wider text-zinc-500">Method</div>
+                  <div className="font-semibold text-zinc-200">{r.method ?? "—"}</div>
+                </div>
+                <div className="rounded-lg bg-white/[0.03] px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-wider text-zinc-500">Account</div>
+                  <div className="truncate font-semibold text-zinc-200">{r.account ?? "—"}</div>
+                </div>
+              </div>
+
+              {r.proofUrl ? (
+                <a href={r.proofUrl} target="_blank" rel="noreferrer" title="Open full size">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={r.proofUrl}
+                    alt="Payout proof"
+                    className="max-h-[50vh] w-full rounded-lg border border-[var(--panel-border)] object-contain"
+                  />
+                </a>
+              ) : (
+                <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-[var(--panel-border)] text-sm text-zinc-600">
+                  No proof attached
+                </div>
+              )}
+
+              <p className="text-xs text-zinc-500">
+                Recorded by <span className="text-zinc-300">{r.reviewed_by ?? "—"}</span> ·{" "}
+                {new Date(r.created_at).toLocaleString()}
+              </p>
+
+              <button
+                onClick={() => setOpenId(null)}
+                className="self-center text-xs font-semibold text-zinc-500 hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </section>
   );
 }
@@ -364,6 +421,8 @@ function CashInQueue() {
   const [error, setError] = useState<string | null>(null);
   // Per-request chosen target player email (defaults to the IGN match).
   const [target, setTarget] = useState<Record<string, string>>({});
+  // The request opened in the detail view (full proof + actions).
+  const [openId, setOpenId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -406,6 +465,7 @@ function CashInQueue() {
         const b = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(b.error ?? "Approve failed.");
       }
+      setOpenId(null);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Approve failed.");
@@ -423,6 +483,7 @@ function CashInQueue() {
         body: JSON.stringify({}),
       });
       if (!res.ok) throw new Error("Reject failed.");
+      setOpenId(null);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Reject failed.");
@@ -460,43 +521,95 @@ function CashInQueue() {
           No {filter === "all" ? "" : filter} requests.
         </p>
       ) : (
-        <ul className="flex flex-col gap-3">
+        // Compact rows: small thumbnail + one line. Click to open the detail view.
+        <ul className="panel flex flex-col divide-y divide-[var(--panel-border)] rounded-2xl">
           {requests.map((r) => (
-            <li key={r.id} className="panel flex flex-col gap-3 rounded-2xl p-4 sm:flex-row">
+            <li key={r.id}>
+              <button
+                onClick={() => setOpenId(r.id)}
+                className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.03]"
+              >
+                {r.proofUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={r.proofUrl}
+                    alt=""
+                    className="h-10 w-10 shrink-0 rounded-md border border-[var(--panel-border)] object-cover"
+                  />
+                ) : (
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--panel-border)] text-[9px] text-zinc-600">
+                    none
+                  </div>
+                )}
+                <span className="min-w-0 flex-1 truncate font-semibold text-zinc-100">{r.ign}</span>
+                <span className="shrink-0 font-bold tabular-nums text-[var(--lg-glow)]">
+                  {coins(r.amount)}
+                </span>
+                <StatusChip status={r.status} />
+                <span className="hidden shrink-0 text-xs text-zinc-500 sm:inline">
+                  {new Date(r.created_at).toLocaleDateString()}
+                </span>
+                <span className="shrink-0 text-zinc-600">›</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Detail view — full proof + review actions. */}
+      {(() => {
+        const r = requests.find((x) => x.id === openId);
+        if (!r) return null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 sm:p-6"
+            onClick={() => setOpenId(null)}
+          >
+            <div
+              className="panel flex max-h-[90vh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-2xl p-5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex flex-col">
+                  <span className="text-xl font-bold text-zinc-100">{r.ign}</span>
+                  <span className="text-2xl font-extrabold tabular-nums text-[var(--lg-glow)]">
+                    {coins(r.amount)}
+                  </span>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  <StatusChip status={r.status} />
+                  <span className="text-xs text-zinc-500">
+                    {new Date(r.created_at).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              {/* Full proof */}
               {r.proofUrl ? (
-                <a href={r.proofUrl} target="_blank" rel="noreferrer" className="shrink-0">
+                <a href={r.proofUrl} target="_blank" rel="noreferrer" title="Open full size">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={r.proofUrl}
                     alt="Payment proof"
-                    className="h-28 w-28 rounded-lg border border-[var(--panel-border)] object-cover"
+                    className="max-h-[50vh] w-full rounded-lg border border-[var(--panel-border)] object-contain"
                   />
                 </a>
               ) : (
-                <div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-lg border border-dashed border-[var(--panel-border)] text-xs text-zinc-600">
-                  no proof
+                <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-[var(--panel-border)] text-sm text-zinc-600">
+                  No proof attached
                 </div>
               )}
 
-              <div className="flex min-w-0 flex-1 flex-col gap-2">
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <span className="text-lg font-bold text-zinc-100">{r.ign}</span>
-                  <span className="text-lg font-extrabold tabular-nums text-[var(--lg-glow)]">
-                    {coins(r.amount)}
-                  </span>
-                  <StatusChip status={r.status} />
-                  <span className="ml-auto text-xs text-zinc-500">
-                    {new Date(r.created_at).toLocaleString()}
-                  </span>
-                </div>
+              {error && <p className="text-sm font-medium text-red-400">{error}</p>}
 
-                {r.status === "pending" ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label className="text-xs text-zinc-500">Credit to:</label>
+              {r.status === "pending" ? (
+                <div className="flex flex-col gap-3">
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-xs text-zinc-500">Credit coins to</span>
                     <select
                       value={target[r.id] ?? r.match?.email ?? ""}
                       onChange={(e) => setTarget((t) => ({ ...t, [r.id]: e.target.value }))}
-                      className="field rounded-lg px-2 py-1 text-sm"
+                      className="field rounded-lg px-2 py-2 text-sm"
                     >
                       <option value="">➕ New player &quot;{r.ign}&quot;</option>
                       {players.map((p) => (
@@ -505,35 +618,44 @@ function CashInQueue() {
                         </option>
                       ))}
                     </select>
-                    <button
-                      onClick={() => approve(r)}
-                      disabled={busy === r.id}
-                      className="btn-neon rounded-full px-4 py-1.5 text-sm disabled:opacity-50"
-                    >
-                      {busy === r.id ? "…" : "Approve"}
-                    </button>
+                  </label>
+                  <div className="flex gap-2">
                     <button
                       onClick={() => reject(r)}
                       disabled={busy === r.id}
-                      className="rounded-full border border-red-400/30 px-4 py-1.5 text-sm font-semibold text-red-300 transition-colors hover:bg-red-400/10 disabled:opacity-50"
+                      className="flex-1 rounded-full border border-red-400/30 px-4 py-2 text-sm font-semibold text-red-300 transition-colors hover:bg-red-400/10 disabled:opacity-50"
                     >
                       Reject
                     </button>
+                    <button
+                      onClick={() => approve(r)}
+                      disabled={busy === r.id}
+                      className="btn-neon flex-[2] rounded-full px-4 py-2 text-sm disabled:opacity-50"
+                    >
+                      {busy === r.id ? "Approving…" : `Approve → credit ${coins(r.amount)}`}
+                    </button>
                   </div>
-                ) : (
-                  <p className="text-xs text-zinc-500">
-                    {r.status === "approved"
-                      ? `Credited to ${r.email ?? "player"}.`
-                      : r.note
-                        ? `Rejected — ${r.note}`
-                        : "Rejected."}
-                  </p>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
+                </div>
+              ) : (
+                <p className="rounded-lg bg-white/[0.03] px-3 py-2 text-sm text-zinc-400">
+                  {r.status === "approved"
+                    ? `Credited to ${r.email ?? "player"}.`
+                    : r.note
+                      ? `Rejected — ${r.note}`
+                      : "Rejected."}
+                </p>
+              )}
+
+              <button
+                onClick={() => setOpenId(null)}
+                className="self-center text-xs font-semibold text-zinc-500 hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </section>
   );
 }
@@ -601,6 +723,9 @@ function Balances() {
     if (!adjust) return;
     const delta = Math.trunc(Number(adjust.delta));
     if (!delta) return;
+    // Don't let a removal drive the balance negative.
+    const cur = players.find((p) => p.email === adjust.email)?.coins ?? 0;
+    if (cur + delta < 0) return;
     setBusy(true);
     await fetch("/api/coins", {
       method: "POST",
@@ -620,7 +745,7 @@ function Balances() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <div className="panel rounded-xl px-4 py-3">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-            Coins in circulation
+            Money in circulation
           </div>
           <div className="text-xl font-extrabold tabular-nums text-[var(--lg-glow)]">
             {totalCoins.toLocaleString()} 🪙
@@ -721,45 +846,140 @@ function Balances() {
         </div>
       )}
 
-      {adjust && canEdit && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
-          <div className="panel flex w-full max-w-sm flex-col gap-4 rounded-2xl p-6">
-            <h3 className="text-lg font-bold text-zinc-100">Adjust balance</h3>
-            <p className="text-xs text-zinc-500">
-              {players.find((p) => p.email === adjust.email)?.ign ?? adjust.email}
-            </p>
-            <label className="flex flex-col gap-1 text-sm">
-              <span className="text-zinc-400">Delta (+/- coins)</span>
-              <input
-                value={adjust.delta}
-                onChange={(e) => setAdjust({ ...adjust, delta: e.target.value.replace(/[^0-9-]/g, "") })}
-                inputMode="numeric"
-                placeholder="e.g. -50"
-                className="field rounded-lg px-3 py-2 text-sm tabular-nums"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              <span className="text-zinc-400">Reason (optional)</span>
-              <input
-                value={adjust.note}
-                onChange={(e) => setAdjust({ ...adjust, note: e.target.value })}
-                className="field rounded-lg px-3 py-2 text-sm"
-              />
-            </label>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setAdjust(null)}
-                className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300"
-              >
-                Cancel
-              </button>
-              <button onClick={saveAdjust} disabled={busy} className="btn-neon rounded-full px-5 py-2 text-sm">
-                {busy ? "Saving…" : "Apply"}
-              </button>
+      {adjust && canEdit && (() => {
+        const target = players.find((p) => p.email === adjust.email);
+        const current = target?.coins ?? 0;
+        // The signed delta = direction × magnitude. The input holds a bare number;
+        // `dir` (+/-) decides whether we add or remove.
+        const magnitude = Math.abs(Math.trunc(Number(adjust.delta)) || 0);
+        const signed = adjust.delta.startsWith("-") ? -magnitude : magnitude;
+        const nextBal = current + signed;
+        const invalid = signed === 0 || nextBal < 0;
+        const setSigned = (n: number) => setAdjust({ ...adjust, delta: String(n) });
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+            onClick={() => setAdjust(null)}
+          >
+            <div
+              className="panel flex w-full max-w-sm flex-col gap-4 rounded-2xl p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header: who + current balance */}
+              <div className="flex flex-col gap-1">
+                <h3 className="text-lg font-bold text-zinc-100">Adjust balance</h3>
+                <div className="flex items-baseline justify-between">
+                  <span className="font-semibold text-zinc-200">{target?.ign ?? adjust.email}</span>
+                  <span className="text-sm text-zinc-400">
+                    now{" "}
+                    <span className="font-bold tabular-nums text-[var(--lg-glow)]">
+                      {current.toLocaleString()} 🪙
+                    </span>
+                  </span>
+                </div>
+              </div>
+
+              {/* Add / Remove direction */}
+              <div className="flex rounded-full bg-black/20 p-1">
+                <button
+                  onClick={() => setSigned(magnitude)}
+                  className={`flex-1 rounded-full py-1.5 text-sm font-semibold transition-colors ${
+                    signed >= 0 ? "bg-emerald-500/20 text-emerald-300" : "text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  ＋ Add
+                </button>
+                <button
+                  onClick={() => setSigned(-magnitude)}
+                  className={`flex-1 rounded-full py-1.5 text-sm font-semibold transition-colors ${
+                    signed < 0 ? "bg-red-500/20 text-red-300" : "text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  － Remove
+                </button>
+              </div>
+
+              {/* Amount + quick presets */}
+              <label className="flex flex-col gap-1.5 text-sm">
+                <span className="text-zinc-400">Amount</span>
+                <input
+                  value={String(magnitude || "")}
+                  onChange={(e) => {
+                    const mag = e.target.value.replace(/[^0-9]/g, "");
+                    setAdjust({ ...adjust, delta: (signed < 0 ? "-" : "") + mag });
+                  }}
+                  inputMode="numeric"
+                  autoFocus
+                  placeholder="0"
+                  className="field rounded-lg px-3 py-2.5 text-base tabular-nums"
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  {[50, 100, 500, 1000].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setAdjust({ ...adjust, delta: (signed < 0 ? "-" : "") + n })}
+                      className="rounded-lg bg-white/5 px-2.5 py-1 text-xs font-semibold text-zinc-300 hover:bg-white/10"
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </label>
+
+              {/* Live new-balance preview */}
+              <div className="flex items-center justify-between rounded-lg bg-white/[0.03] px-3 py-2 text-sm">
+                <span className="text-zinc-500">New balance</span>
+                <span className="flex items-center gap-2">
+                  {signed !== 0 && (
+                    <span className={`text-xs font-semibold ${signed < 0 ? "text-red-400" : "text-emerald-400"}`}>
+                      {signed > 0 ? "+" : ""}
+                      {signed.toLocaleString()}
+                    </span>
+                  )}
+                  <span
+                    className={`font-bold tabular-nums ${
+                      nextBal < 0 ? "text-red-400" : "text-[var(--lg-glow)]"
+                    }`}
+                  >
+                    {nextBal.toLocaleString()} 🪙
+                  </span>
+                </span>
+              </div>
+              {nextBal < 0 && (
+                <p className="-mt-2 text-xs font-medium text-red-400">
+                  Balance can&apos;t go below zero.
+                </p>
+              )}
+
+              <label className="flex flex-col gap-1.5 text-sm">
+                <span className="text-zinc-400">Reason (optional)</span>
+                <input
+                  value={adjust.note}
+                  onChange={(e) => setAdjust({ ...adjust, note: e.target.value })}
+                  placeholder="e.g. correction, bonus…"
+                  className="field rounded-lg px-3 py-2 text-sm"
+                />
+              </label>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setAdjust(null)}
+                  className="rounded-full border border-[var(--panel-border)] px-4 py-2 text-sm font-semibold text-zinc-300 hover:bg-white/5"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveAdjust}
+                  disabled={busy || invalid}
+                  className="btn-neon rounded-full px-5 py-2 text-sm disabled:opacity-40"
+                >
+                  {busy ? "Saving…" : "Apply"}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </section>
   );
 }

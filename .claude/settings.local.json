@@ -84,7 +84,9 @@
       "Bash(grep -n \"}\\)}\\\\s*$\\\\|</section>\\\\|result.teams.map\\(\\(team, i\\)\" src/app/balancer.tsx)",
       "Bash(curl -s -o /dev/null -D - \"http://localhost:3000/login\")",
       "Bash(curl -s -o /dev/null -D - https://loungee-nine.vercel.app/cashin)",
-      "Bash(node -e 'console.log\\(require\\(\"crypto\"\\).randomBytes\\(48\\).toString\\(\"base64url\"\\)\\)')"
+      "Bash(node -e 'console.log\\(require\\(\"crypto\"\\).randomBytes\\(48\\).toString\\(\"base64url\"\\)\\)')",
+      "Bash(cd \"c:/Users/test/dota-balancer\" && grep -n \"create or replace function place_bet\" src/../supabase/coins.sql)",
+      "Read(//c/Users/test/dota-balancer/supabase/**)"
     ],
     "additionalDirectories": [
       "\\tmp",

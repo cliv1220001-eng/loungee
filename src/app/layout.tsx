@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { SESSION_COOKIE, isValidSession } from "@/lib/auth";
 import LogoutButton from "./logout-button";
+import { AuditIcon, BetsIcon, BracketIcon, TeamsIcon, TrophyIcon } from "./icons";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -52,33 +53,33 @@ export default async function RootLayout({
               <div className="ml-auto flex items-center gap-1 text-sm">
                 <Link
                   href="/"
-                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                  className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
                 >
-                  Teams
+                  <TeamsIcon /> Teams
                 </Link>
                 <Link
                   href="/bracket"
-                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                  className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
                 >
-                  Bracket
+                  <BracketIcon /> Bracket
                 </Link>
                 <Link
                   href="/leaderboard"
-                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                  className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
                 >
-                  Leaderboard
+                  <TrophyIcon /> Leaderboard
                 </Link>
                 <Link
                   href="/betting"
-                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                  className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
                 >
-                  Betting
+                  <BetsIcon /> Betting
                 </Link>
                 <Link
                   href="/audit"
-                  className="rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                  className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
                 >
-                  Audit
+                  <AuditIcon /> Audit
                 </Link>
                 <LogoutButton />
               </div>

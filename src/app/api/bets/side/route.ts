@@ -58,6 +58,9 @@ export async function POST(req: NextRequest) {
     }
 
     const sb = getSupabase();
+    // Shared id linking the two legs of this matched pair (for unambiguous UI
+    // pairing when several same-stake side bets exist).
+    const pairId = crypto.randomUUID();
 
     // Leg 1.
     const { data: idA, error: errA } = await sb.rpc("place_bet", {
@@ -67,6 +70,7 @@ export async function POST(req: NextRequest) {
       p_team_id: teamA,
       p_stake: stake,
       p_kind: "side",
+      p_pair_id: pairId,
     });
     if (errA) {
       const msg = errA.message.includes("insufficient")
@@ -83,6 +87,7 @@ export async function POST(req: NextRequest) {
       p_team_id: teamB,
       p_stake: stake,
       p_kind: "side",
+      p_pair_id: pairId,
     });
     if (errB) {
       await sb.rpc("void_bet", { p_id: idA });

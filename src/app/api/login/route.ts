@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { SESSION_COOKIE, makeSessionToken, type Role } from "@/lib/auth";
 import { getSupabase } from "@/lib/supabase";
 import { verifyPassword } from "@/lib/password";
-import { audit } from "@/lib/audit";
+import { auditOncePerDay } from "@/lib/audit";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 
 /**
@@ -56,7 +56,7 @@ export async function POST(request: Request) {
         path: "/",
         maxAge: 60 * 60 * 24 * 7, // 7 days
       });
-      void audit(user.username, "login", null, { role });
+      void auditOncePerDay(user.username, "login", { role });
       return res;
     }
   } catch {

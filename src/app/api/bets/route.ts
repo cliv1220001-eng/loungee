@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
     const sb = getSupabase();
     const { data, error } = await sb
       .from("bets")
-      .select("id,run_id,match_id,email,team_id,stake,kind,status,payout,created_at,settled_at")
+      .select("id,run_id,match_id,email,team_id,stake,kind,pair_id,status,payout,created_at,settled_at")
       .eq("run_id", runId)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);

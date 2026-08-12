@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import TabPills from "../tab-pills";
+import { AdjustIcon, AllIcon, BetsIcon, CashInIcon, CashOutIcon, TeamsIcon, TrophyIcon } from "../icons";
 
 interface AuditEntry {
   id: string;
@@ -69,16 +71,6 @@ export default function AuditPage() {
     [entries]
   );
 
-  const GROUPS: [string, string][] = [
-    ["", "All"],
-    ["cashin", "Cash-in"],
-    ["cashout", "Cash-out"],
-    ["coins", "Adjustments"],
-    ["bet", "Bets"],
-    ["tournament", "Tournaments"],
-    ["login", "Logins"],
-  ];
-
   return (
     <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-8">
       <header className="mb-6 flex flex-col gap-1">
@@ -87,19 +79,20 @@ export default function AuditPage() {
       </header>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="inline-flex flex-wrap rounded-full bg-black/20 p-1">
-          {GROUPS.map(([key, label]) => (
-            <button
-              key={key || "all"}
-              onClick={() => setGroup(key)}
-              className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
-                group === key ? "btn-neon" : "text-zinc-400 hover:text-white"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <TabPills
+          size="sm"
+          active={group}
+          onChange={setGroup}
+          tabs={[
+            { key: "", label: "All", icon: <AllIcon /> },
+            { key: "cashin", label: "Cash-in", icon: <CashInIcon /> },
+            { key: "cashout", label: "Cash-out", icon: <CashOutIcon /> },
+            { key: "coins", label: "Adjustments", icon: <AdjustIcon /> },
+            { key: "bet", label: "Bets", icon: <BetsIcon /> },
+            { key: "tournament", label: "Tournaments", icon: <TrophyIcon /> },
+            { key: "login", label: "Logins", icon: <TeamsIcon /> },
+          ]}
+        />
         <select
           value={actor}
           onChange={(e) => setActor(e.target.value)}

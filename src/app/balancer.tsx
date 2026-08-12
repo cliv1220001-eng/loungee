@@ -27,6 +27,7 @@ import DraftReveal from "./draft-reveal";
 import CoinToss from "./coin-toss";
 import TeamReel from "./team-reel";
 import ForestRanger from "./forest-ranger";
+import { CoinIcon, RolesIcon, ScalesIcon, TeamsIcon } from "./icons";
 import { startingLr } from "@/lib/lr";
 import { usePersistentState } from "@/lib/store";
 import { ROLE_LABELS, type Player, type Role, type Team } from "@/lib/types";
@@ -75,6 +76,14 @@ const MODES: { key: PageMode; label: string; hint: string }[] = [
   { key: "draft", label: "Captain's Draft", hint: "Captains pick, snake order" },
   { key: "bet", label: "Captain's Draft (Bet Game)", hint: "Coin toss, 10 players, 1-1 picks" },
 ];
+
+/** Per-mode icon for the mode selector cards. */
+const MODE_ICONS: Record<string, ReactNode> = {
+  mmr: <ScalesIcon width={18} height={18} />,
+  role: <RolesIcon width={18} height={18} />,
+  draft: <TeamsIcon width={18} height={18} />,
+  bet: <CoinIcon width={18} height={18} />,
+};
 
 /** The measure of strength the balancer weights by (ignored by Random). */
 const BASES: { key: BalanceBasis; label: string; hint: string }[] = [
@@ -139,6 +148,13 @@ interface BalancerSession {
    * "tournament" (3+). Purely a label — it doesn't change how teams are built.
    */
   kind?: "lobby" | "tournament";
+  /**
+   * True when this result came from a Captain's Draft (Bet Game). ONLY these
+   * allow coin side bets — a regular 2-team lobby does not.
+   */
+  betGame?: boolean;
+  /** Default per-player stake for side bets in a Bet Game (pre-fills new bets). */
+  sideStake?: number;
 }
 
 /** Human label for a tournament kind. */
@@ -494,7 +510,7 @@ export default function Balancer({
   // tournament, plus the in-progress bet draft (player / team / stake).
   const [coinPlayers, setCoinPlayers] = useState<{ email: string; ign: string; coins: number }[]>([]);
   const [sideBets, setSideBets] = useState<
-    { id: string; email: string; ign: string; team_id: number; stake: number; status: string; payout: number }[]
+    { id: string; email: string; ign: string; team_id: number; stake: number; status: string; payout: number; pair_id: string | null }[]
   >([]);
   // A matched side bet: one player on each team, same stake. Winner takes the
   // loser's coins. `playerA` backs the first team, `playerB` the second.
@@ -590,6 +606,7 @@ export default function Balancer({
           kind: string;
           status: string;
           payout: number;
+          pair_id: string | null;
         }[];
       };
       setCoinPlayers(pBody.players ?? []);
@@ -603,13 +620,20 @@ export default function Balancer({
 
   // Load side bets whenever a 2-team result is on screen (Bet Game / any lobby),
   // so the side-bet panel shows current balances + existing wagers.
-  const sideBetsActive = Boolean(result) && showTeams && effectiveKind === "lobby";
+  // Coin side bets are ONLY for a Captain's Draft (Bet Game) — not a regular
+  // 2-team lobby. Gated on the session's betGame tag.
+  const sideBetsActive =
+    Boolean(result) && showTeams && effectiveKind === "lobby" && session.betGame === true;
   useEffect(() => {
     if (!sideBetsActive || !currentId) return;
-    // Genuine data load when the 2-team result appears; setState is inside the
-    // async body of refreshSideBets, not synchronous here.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // Seed the draft stake from the game's default (once, when it appears), and
+    // load balances + existing bets. setState lives in refreshSideBets' async body.
+    if (session.sideStake && !sideBetDraft.stake) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSideBetDraft((d) => ({ ...d, stake: String(session.sideStake) }));
+    }
     void refreshSideBets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sideBetsActive, currentId, refreshSideBets]);
 
   // Coin balance per player email, for showing who can side-bet on the results
@@ -777,7 +801,8 @@ export default function Balancer({
       teams,
       spread: totals.length ? Math.max(...totals) - Math.min(...totals) : 0,
     };
-    setSession((s) => ({ ...s, result: res, generated: res, resultBasis: basis }));
+    // A regular draft is NOT a Bet Game → no coin side bets.
+    setSession((s) => ({ ...s, result: res, generated: res, resultBasis: basis, betGame: false }));
     setRevealed(true);
     setDraft(null);
   }
@@ -839,7 +864,9 @@ export default function Balancer({
       teams,
       spread: totals.length ? Math.max(...totals) - Math.min(...totals) : 0,
     };
-    setSession((s) => ({ ...s, result: res, generated: res, resultBasis: basis }));
+    // Mark this result as a Bet Game so the side-bet panel is available (and only
+    // here). The default side stake carries over from the session if set.
+    setSession((s) => ({ ...s, result: res, generated: res, resultBasis: basis, betGame: true }));
     setRevealed(true);
     setBetDraft(null);
   }
@@ -909,7 +936,9 @@ export default function Balancer({
       setSideBetMsg(b.error ?? "Bet failed.");
       return;
     }
-    setSideBetDraft({ playerA: "", playerB: "", stake: "" });
+    // Reset the players but KEEP the stake (default) so you can add pair after
+    // pair quickly.
+    setSideBetDraft((d) => ({ playerA: "", playerB: "", stake: d.stake }));
     await refreshSideBets();
   }
 
@@ -1055,7 +1084,7 @@ export default function Balancer({
       // reverted, and pin the basis these teams were built with so the totals on
       // screen keep describing how they were actually balanced.
       const fresh = body as BalanceResult;
-      setSession((s) => ({ ...s, result: fresh, generated: fresh, resultBasis: basis }));
+      setSession((s) => ({ ...s, result: fresh, generated: fresh, resultBasis: basis, betGame: false }));
       setShuffleKey((k) => k + 1);
       // New teams => the old bracket's winners are meaningless (different team
       // ids/order). Explicitly clear the saved bracket + its LR so we start clean.
@@ -1573,13 +1602,11 @@ export default function Balancer({
                 }`}
               >
                 <span
-                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
-                    active
-                      ? "border-[var(--accent)] bg-[var(--accent)]"
-                      : "border-zinc-600"
+                  className={`shrink-0 transition-colors ${
+                    active ? "text-[var(--lg-glow)]" : "text-zinc-500"
                   }`}
                 >
-                  {active && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                  {MODE_ICONS[m.key] ?? <ScalesIcon width={18} height={18} />}
                 </span>
                 <span className="flex flex-col">
                   <span className="font-semibold">{m.label}</span>
@@ -2637,19 +2664,42 @@ export default function Balancer({
             }[] = [];
             const usedB = new Set<string>();
             for (const a of legsA) {
-              const match = legsB.find((x) => !usedB.has(x.id) && x.stake === a.stake);
+              // Prefer linking by the shared pair_id; fall back to equal stake for
+              // any legacy legs placed before pair_id existed.
+              const match =
+                legsB.find((x) => !usedB.has(x.id) && a.pair_id && x.pair_id === a.pair_id) ??
+                legsB.find((x) => !usedB.has(x.id) && x.stake === a.stake);
               if (match) usedB.add(match.id);
               pairs.push({ a, b: match });
             }
             return (
               <div className="panel flex flex-col gap-3 rounded-2xl p-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400">
                     Side bets
                   </h3>
                   <span className="text-xs text-zinc-500">
                     Head-to-head · winner takes the loser&apos;s coins · settles with the bracket
                   </span>
+                </div>
+
+                {/* Default stake for this Bet Game — pre-fills every new pair. */}
+                <div className="flex flex-wrap items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-2">
+                  <span className="text-xs font-semibold text-zinc-400">Default stake</span>
+                  <input
+                    value={session.sideStake ? String(session.sideStake) : ""}
+                    onChange={(e) => {
+                      const v = Math.trunc(Number(e.target.value.replace(/[^0-9]/g, ""))) || 0;
+                      setSession((s) => ({ ...s, sideStake: v }));
+                      // Keep the current draft's stake in sync if it's still empty
+                      // or matched the old default.
+                      setSideBetDraft((d) => ({ ...d, stake: v ? String(v) : d.stake }));
+                    }}
+                    placeholder="e.g. 100"
+                    inputMode="numeric"
+                    className="field w-28 rounded-lg px-2 py-1 text-sm tabular-nums"
+                  />
+                  <span className="text-xs text-zinc-600">applied to new bets below</span>
                 </div>
 
                 {!currentId ? (

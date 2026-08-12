@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { rankOf } from "@/lib/lr";
 import { ROLE_LABELS, type Role } from "@/lib/types";
+import TabPills from "../tab-pills";
+import { CalendarIcon, TrophyIcon } from "../icons";
 
 interface LeaderboardPlayer {
   email: string;
@@ -224,24 +226,14 @@ export default function LeaderboardPage() {
 
       {/* Filter: all-time vs a specific month */}
       <div className="flex flex-col gap-3">
-        <div className="panel flex w-fit rounded-full p-1">
-          <button
-            onClick={() => setMonth("")}
-            className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
-              !monthly ? "btn-neon" : "text-zinc-400 hover:text-white"
-            }`}
-          >
-            All time
-          </button>
-          <button
-            onClick={() => setMonth((m) => (m === "" ? thisMonth() : m))}
-            className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
-              monthly ? "btn-neon" : "text-zinc-400 hover:text-white"
-            }`}
-          >
-            By month
-          </button>
-        </div>
+        <TabPills
+          active={monthly ? "month" : "all"}
+          onChange={(k) => setMonth(k === "all" ? "" : (m) => (m === "" ? thisMonth() : m))}
+          tabs={[
+            { key: "all", label: "All time", icon: <TrophyIcon /> },
+            { key: "month", label: "By month", icon: <CalendarIcon /> },
+          ]}
+        />
 
         {monthly && <MonthPicker value={month} onChange={setMonth} />}
       </div>

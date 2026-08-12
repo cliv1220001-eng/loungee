@@ -75,8 +75,13 @@ do $$ begin
   alter table bets add constraint bets_kind_check check (kind in ('game', 'side'));
 exception when duplicate_object then null; end $$;
 
+-- Links the two legs of a matched side bet so the UI can pair them
+-- unambiguously (null for solo/game bets). Settlement is per-leg regardless.
+alter table bets add column if not exists pair_id uuid;
+
 create index if not exists bets_run_match_idx on bets (run_id, match_id);
 create index if not exists bets_email_idx on bets (email);
+create index if not exists bets_pair_idx on bets (pair_id);
 
 -- ---------------------------------------------------------------------------
 -- RPCs. All mutate coin_events then recompute the affected players' cached
@@ -146,7 +151,7 @@ end $$;
 -- Returns the new bet id.
 create or replace function place_bet(
   p_run_id text, p_match_id text, p_email text, p_team_id integer, p_stake integer,
-  p_kind text default 'game'
+  p_kind text default 'game', p_pair_id uuid default null
 ) returns uuid language plpgsql as $$
 declare
   email_l text := lower(p_email);
@@ -172,8 +177,8 @@ begin
     raise exception 'insufficient balance: have %, need %', bal, p_stake;
   end if;
 
-  insert into bets (run_id, match_id, email, team_id, stake, kind)
-  values (p_run_id, p_match_id, email_l, p_team_id, p_stake, kind_l)
+  insert into bets (run_id, match_id, email, team_id, stake, kind, pair_id)
+  values (p_run_id, p_match_id, email_l, p_team_id, p_stake, kind_l, p_pair_id)
   returning id into new_id;
 
   insert into coin_events (email, delta, kind, ref, note)
