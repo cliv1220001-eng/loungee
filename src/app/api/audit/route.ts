@@ -28,7 +28,31 @@ export async function GET(req: NextRequest) {
 
     const { data, error } = await query;
     if (error) throw new Error(error.message);
-    return NextResponse.json({ entries: data ?? [] });
+    const entries = data ?? [];
+
+    // Enrich with tournament names. Targets for tournament/bet actions look like
+    // "<runId>" or "<runId>/<matchId>"; resolve the runId (a UUID) to its name so
+    // the log reads "LGBet 34" instead of a raw id.
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const runIds = new Set<string>();
+    for (const e of entries) {
+      const first = (e.target ?? "").split("/")[0];
+      if (uuidRe.test(first)) runIds.add(first);
+    }
+    const nameById = new Map<string, string>();
+    if (runIds.size) {
+      const { data: tourneys } = await sb
+        .from("tournaments")
+        .select("id,name")
+        .in("id", [...runIds]);
+      for (const t of tourneys ?? []) nameById.set(t.id, t.name);
+    }
+    const enriched = entries.map((e) => {
+      const first = (e.target ?? "").split("/")[0];
+      return { ...e, tournamentName: nameById.get(first) ?? null };
+    });
+
+    return NextResponse.json({ entries: enriched });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
