@@ -86,7 +86,8 @@
       "Bash(curl -s -o /dev/null -D - https://loungee-nine.vercel.app/cashin)",
       "Bash(node -e 'console.log\\(require\\(\"crypto\"\\).randomBytes\\(48\\).toString\\(\"base64url\"\\)\\)')",
       "Bash(cd \"c:/Users/test/dota-balancer\" && grep -n \"create or replace function place_bet\" src/../supabase/coins.sql)",
-      "Read(//c/Users/test/dota-balancer/supabase/**)"
+      "Read(//c/Users/test/dota-balancer/supabase/**)",
+      "Bash(grep -n \"Lock in bets\\\\|}\\)\\(\\)}\\\\s*$\\\\|</section>\" src/app/balancer.tsx)"
     ],
     "additionalDirectories": [
       "\\tmp",

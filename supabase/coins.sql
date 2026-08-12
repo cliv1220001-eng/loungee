@@ -149,6 +149,10 @@ end $$;
 -- Place a bet: debit the stake and open the wager. Rejects if the balance is too
 -- low. `p_kind` is 'game' (fixed tiers 20/50/100) or 'side' (any amount).
 -- Returns the new bet id.
+-- Drop the older 6-arg signature so adding p_pair_id doesn't leave two
+-- overloads (which makes PostgREST calls ambiguous — PGRST203).
+drop function if exists place_bet(text, text, text, integer, integer, text);
+
 create or replace function place_bet(
   p_run_id text, p_match_id text, p_email text, p_team_id integer, p_stake integer,
   p_kind text default 'game', p_pair_id uuid default null

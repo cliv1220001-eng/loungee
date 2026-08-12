@@ -506,19 +506,26 @@ export default function Balancer({
   /** A fair 50/50, generated when the toss opens so render stays pure. */
   const [coinFlip, setCoinFlip] = useState<CoinSide>("a");
 
-  // Side bets on a 2-team lobby result. Coin players + existing bets for this
-  // tournament, plus the in-progress bet draft (player / team / stake).
+  // Bet Game team wager: every player auto-bets a fixed stake (20/50/100) on their
+  // own team. coinPlayers = current balances; teamBets = the locked-in bets.
   const [coinPlayers, setCoinPlayers] = useState<{ email: string; ign: string; coins: number }[]>([]);
+  const [teamBets, setTeamBets] = useState<
+    { id: string; email: string; ign: string; team_id: number; stake: number; status: string; payout: number }[]
+  >([]);
+  /** The chosen stake tier (0 = none picked yet). */
+  const [betStake, setBetStake] = useState<number>(0);
+  const [betMsg, setBetMsg] = useState<string | null>(null);
+  const [betBusy, setBetBusy] = useState(false);
+  // Player-vs-player side bets (in addition to the team bet). Each matched pair is
+  // one player on each team, same stake; multiple pairs allowed.
   const [sideBets, setSideBets] = useState<
     { id: string; email: string; ign: string; team_id: number; stake: number; status: string; payout: number; pair_id: string | null }[]
   >([]);
-  // A matched side bet: one player on each team, same stake. Winner takes the
-  // loser's coins. `playerA` backs the first team, `playerB` the second.
-  const [sideBetDraft, setSideBetDraft] = useState<{
-    playerA: string;
-    playerB: string;
-    stake: string;
-  }>({ playerA: "", playerB: "", stake: "" });
+  const [sideBetDraft, setSideBetDraft] = useState<{ playerA: string; playerB: string; stake: string }>({
+    playerA: "",
+    playerB: "",
+    stake: "",
+  });
   const [sideBetMsg, setSideBetMsg] = useState<string | null>(null);
 
   // True once the roster differs from what was generated.
@@ -579,13 +586,13 @@ export default function Balancer({
     };
   }, [currentId]);
 
-  // --- Side bets on a 2-team result -------------------------------------------
-  // A side bet is an unlimited-stake wager on which team wins. It attaches to this
-  // tournament's final match (wb-r0-m0 for a 2-team bracket) and auto-settles when
-  // the bracket records the winner — the same path normal coin bets use.
-  const SIDE_BET_MATCH_ID = "wb-r0-m0";
+  // --- Bet Game team wager ----------------------------------------------------
+  // Every player auto-bets a fixed stake on their own team; the winning team's
+  // players win (even money), settled when the bracket records the final. The bets
+  // attach to this tournament's final match (wb-r0-m0 for a 2-team bracket).
+  const BET_MATCH_ID = "wb-r0-m0";
 
-  const refreshSideBets = useCallback(async () => {
+  const refreshTeamBets = useCallback(async () => {
     if (!currentId) return;
     try {
       const [pRes, bRes] = await Promise.all([
@@ -610,31 +617,26 @@ export default function Balancer({
         }[];
       };
       setCoinPlayers(pBody.players ?? []);
-      setSideBets(
-        (bBody.bets ?? []).filter((b) => b.kind === "side" && b.match_id === SIDE_BET_MATCH_ID)
-      );
+      const forMatch = (bBody.bets ?? []).filter((b) => b.match_id === BET_MATCH_ID);
+      setTeamBets(forMatch.filter((b) => b.kind === "game"));
+      setSideBets(forMatch.filter((b) => b.kind === "side"));
     } catch {
       // best-effort — the panel just shows what it last had
     }
   }, [currentId]);
 
-  // Load side bets whenever a 2-team result is on screen (Bet Game / any lobby),
-  // so the side-bet panel shows current balances + existing wagers.
-  // Coin side bets are ONLY for a Captain's Draft (Bet Game) — not a regular
-  // 2-team lobby. Gated on the session's betGame tag.
+  // Show the team-wager panel only for a Captain's Draft (Bet Game) result.
   const sideBetsActive =
     Boolean(result) && showTeams && effectiveKind === "lobby" && session.betGame === true;
   useEffect(() => {
     if (!sideBetsActive || !currentId) return;
-    // Seed the draft stake from the game's default (once, when it appears), and
-    // load balances + existing bets. setState lives in refreshSideBets' async body.
-    if (session.sideStake && !sideBetDraft.stake) {
+    if (session.sideStake && betStake === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSideBetDraft((d) => ({ ...d, stake: String(session.sideStake) }));
+      setBetStake(session.sideStake);
     }
-    void refreshSideBets();
+    void refreshTeamBets();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sideBetsActive, currentId, refreshSideBets]);
+  }, [sideBetsActive, currentId, refreshTeamBets]);
 
   // Coin balance per player email, for showing who can side-bet on the results
   // screen. Undefined until the coin data loads (or if the player has no wallet).
@@ -877,54 +879,77 @@ export default function Balancer({
     setCoinToss(null);
   }
 
+  /** Emails (with coin accounts) on a given result team. */
+  const teamEmails = useCallback(
+    (teamId: number | undefined): string[] =>
+      teamId == null
+        ? []
+        : (result?.teams.find((t) => t.id === teamId)?.players ?? [])
+            .map((p) => (p.email ?? "").trim().toLowerCase())
+            .filter((e) => e !== ""),
+    [result]
+  );
+
+  /** Lock in the team wager: every player stakes `betStake` on their own team. */
+  async function lockTeamStake() {
+    setBetMsg(null);
+    const teamA = result?.teams[0]?.id;
+    const teamB = result?.teams[1]?.id;
+    if (!currentId) return setBetMsg("Save the tournament first.");
+    if (teamA == null || teamB == null) return setBetMsg("Need two teams.");
+    if (![20, 50, 100].includes(betStake)) return setBetMsg("Choose a stake: 20, 50 or 100.");
+
+    setBetBusy(true);
+    // Persist teams so the bracket settles by the same id.
+    await saveNow();
+    const res = await fetch("/api/bets/teamstake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runId: currentId,
+        matchId: BET_MATCH_ID,
+        stake: betStake,
+        teamA,
+        teamB,
+        playersA: teamEmails(teamA),
+        playersB: teamEmails(teamB),
+      }),
+    });
+    if (!res.ok) {
+      const b = (await res.json().catch(() => ({}))) as { error?: string };
+      setBetMsg(b.error ?? "Couldn't lock in bets.");
+      setBetBusy(false);
+      return;
+    }
+    setBetBusy(false);
+    await refreshTeamBets();
+  }
+
+  /** Place a player-vs-player side bet (matched pair, same stake). */
   async function placeSideBet() {
     setSideBetMsg(null);
     const { playerA, playerB, stake } = sideBetDraft;
     const teamA = result?.teams[0]?.id;
     const teamB = result?.teams[1]?.id;
-    if (!currentId) {
-      setSideBetMsg("Save the tournament first.");
-      return;
-    }
-    if (!playerA || !playerB) {
-      setSideBetMsg("Pick a player for each team.");
-      return;
-    }
-    if (playerA === playerB) {
-      setSideBetMsg("Pick two different players.");
-      return;
-    }
-    if (!(Number(stake) > 0)) {
-      setSideBetMsg("Enter a stake.");
-      return;
-    }
-    if (teamA == null || teamB == null) {
-      setSideBetMsg("Need two teams to match a side bet.");
-      return;
-    }
-    // Both players must have the stake in coins (the server enforces this too, but
-    // check here so we can name WHICH player is short before hitting the API).
     const balOf = (email: string) => coinPlayers.find((p) => p.email === email)?.coins ?? 0;
     const ignOf = (email: string) => coinPlayers.find((p) => p.email === email)?.ign ?? email;
+    if (!currentId) return setSideBetMsg("Save the tournament first.");
+    if (!playerA || !playerB) return setSideBetMsg("Pick a player for each team.");
+    if (playerA === playerB) return setSideBetMsg("Pick two different players.");
     const need = Number(stake);
-    if (balOf(playerA) < need) {
-      setSideBetMsg(`${ignOf(playerA)} only has ${balOf(playerA)} coins.`);
-      return;
-    }
-    if (balOf(playerB) < need) {
-      setSideBetMsg(`${ignOf(playerB)} only has ${balOf(playerB)} coins.`);
-      return;
-    }
-    // Persist the teams so the bracket can settle by the same id, then record the
-    // matched pair (both legs) atomically.
+    if (!(need > 0)) return setSideBetMsg("Enter a stake.");
+    if (teamA == null || teamB == null) return setSideBetMsg("Need two teams.");
+    if (balOf(playerA) < need) return setSideBetMsg(`${ignOf(playerA)} only has ${balOf(playerA)} coins.`);
+    if (balOf(playerB) < need) return setSideBetMsg(`${ignOf(playerB)} only has ${balOf(playerB)} coins.`);
+
     await saveNow();
     const res = await fetch("/api/bets/side", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         runId: currentId,
-        matchId: SIDE_BET_MATCH_ID,
-        stake: Number(stake),
+        matchId: BET_MATCH_ID,
+        stake: need,
         playerA,
         teamA,
         playerB,
@@ -936,10 +961,9 @@ export default function Balancer({
       setSideBetMsg(b.error ?? "Bet failed.");
       return;
     }
-    // Reset the players but KEEP the stake (default) so you can add pair after
-    // pair quickly.
+    // Keep the stake so you can add pair after pair quickly.
     setSideBetDraft((d) => ({ playerA: "", playerB: "", stake: d.stake }));
-    await refreshSideBets();
+    await refreshTeamBets();
   }
 
   const teamNote: { tone: "info" | "warn" | "ok"; text: string } = (() => {
@@ -2635,37 +2659,157 @@ export default function Balancer({
             })}
           </div>
 
-          {/* Side bets — a head-to-head between two players on opposite teams,
-              same stake. Winner takes the loser's coins. Settles when the bracket
-              records the winner. */}
+          {/* Bet Game team wager — every player on a team auto-bets a fixed stake
+              on their own team. Winning team's players win (even money); settles
+              when the bracket records the final. */}
           {sideBetsActive && (() => {
             const teamA = result.teams[0];
             const teamB = result.teams[1];
             const accentA = TEAM_ACCENTS[0];
             const accentB = TEAM_ACCENTS[1];
-            const ignOf = (email: string) =>
-              coinPlayers.find((p) => p.email === email)?.ign ?? email;
-            const balOf = (email: string) =>
-              coinPlayers.find((p) => p.email === email)?.coins ?? 0;
-            // Live insufficient-balance check for the draft, to warn + disable
-            // before submitting. Both players must hold the stake.
+            const balOf = (email: string | null | undefined) =>
+              coinPlayers.find((p) => p.email === (email ?? "").trim().toLowerCase())?.coins ?? 0;
+            const locked = teamBets.length > 0;
+            const settled = teamBets.some((b) => b.status !== "open");
+            // Who can't afford the chosen stake (only matters before locking in).
+            const shortNames = [...teamA.players, ...teamB.players]
+              .filter((p) => (p.email ?? "").trim() !== "" && balOf(p.email) < betStake)
+              .map((p) => p.name);
+            const canLock = betStake > 0 && shortNames.length === 0 && !locked;
+            const winningTeamId = settled
+              ? teamBets.find((b) => b.status === "won")?.team_id ?? null
+              : null;
+
+            const teamRow = (team: typeof teamA, accent: string) => (
+              <div className="flex-1 rounded-xl border p-3" style={{ borderColor: accent }}>
+                <div className="mb-1.5 flex items-baseline justify-between">
+                  <span className="text-sm font-bold" style={{ color: accent }}>
+                    Team {team.id}
+                    {winningTeamId === team.id && (
+                      <span className="ml-2 rounded-full bg-emerald-400/15 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-300">
+                        Won
+                      </span>
+                    )}
+                  </span>
+                  {betStake > 0 && (
+                    <span className="text-xs text-zinc-500">
+                      {team.players.length} × {betStake} 🪙
+                    </span>
+                  )}
+                </div>
+                <ul className="flex flex-col gap-0.5 text-[13px]">
+                  {team.players.map((p) => {
+                    const bal = balOf(p.email);
+                    const short = betStake > 0 && !locked && bal < betStake;
+                    return (
+                      <li key={p.id} className="flex items-center justify-between gap-2">
+                        <span className="truncate text-zinc-200">{p.name}</span>
+                        <span className={`shrink-0 tabular-nums ${short ? "text-red-400" : "text-zinc-500"}`}>
+                          {bal.toLocaleString()} 🪙
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            );
+
+            return (
+              <div className="panel flex flex-col gap-3 rounded-2xl p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400">
+                    Team bet
+                  </h3>
+                  <span className="text-xs text-zinc-500">
+                    Everyone bets on their team · even money · settles with the bracket
+                  </span>
+                </div>
+
+                {/* Stake picker */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm text-zinc-400">Stake per player:</span>
+                  {[20, 50, 100].map((tier) => (
+                    <button
+                      key={tier}
+                      disabled={locked}
+                      onClick={() => {
+                        setBetStake(tier);
+                        setSession((s) => ({ ...s, sideStake: tier }));
+                      }}
+                      className={`rounded-lg px-4 py-1.5 text-sm font-bold tabular-nums transition-colors disabled:opacity-40 ${
+                        betStake === tier
+                          ? "bg-[var(--accent)]/25 text-[var(--lg-glow)] ring-1 ring-[var(--accent)]"
+                          : "bg-white/5 text-zinc-300 hover:bg-white/10"
+                      }`}
+                    >
+                      {tier} 🪙
+                    </button>
+                  ))}
+                </div>
+
+                {/* Team rosters with balances */}
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  {teamRow(teamA, accentA)}
+                  {teamRow(teamB, accentB)}
+                </div>
+
+                {shortNames.length > 0 && betStake > 0 && !locked && (
+                  <p className="text-xs font-medium text-amber-300">
+                    Not enough coins for {betStake} 🪙: {shortNames.join(", ")}. Cash them in first.
+                  </p>
+                )}
+                {betMsg && <p className="text-sm font-medium text-red-400">{betMsg}</p>}
+
+                {/* Action */}
+                {locked ? (
+                  <div className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-2 text-sm">
+                    <span className="font-semibold text-zinc-200">
+                      Bets locked in — {teamBets[0]?.stake} 🪙 each.
+                    </span>
+                    {settled ? (
+                      <span className="text-emerald-400">Team {winningTeamId} won.</span>
+                    ) : (
+                      <span className="text-sky-300">Settles when the bracket records the winner.</span>
+                    )}
+                    <button
+                      onClick={() => void refreshTeamBets()}
+                      className="ml-auto text-xs font-semibold text-zinc-400 hover:text-white"
+                    >
+                      ↻ Refresh
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => void lockTeamStake()}
+                    disabled={!canLock || betBusy}
+                    title={!canLock ? "Pick a stake everyone can afford" : undefined}
+                    className="btn-neon self-start rounded-full px-6 py-2.5 text-sm disabled:opacity-40"
+                  >
+                    {betBusy ? "Locking in…" : "Lock in bets"}
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Player-vs-player side bets — extra head-to-head wagers between two
+              players on opposite teams. Multiple pairs allowed. */}
+          {sideBetsActive && (() => {
+            const teamA = result.teams[0];
+            const teamB = result.teams[1];
+            const accentA = TEAM_ACCENTS[0];
+            const accentB = TEAM_ACCENTS[1];
+            const ignOf = (email: string) => coinPlayers.find((p) => p.email === email)?.ign ?? email;
+            const balOf = (email: string) => coinPlayers.find((p) => p.email === email)?.coins ?? 0;
             const wantStake = Number(sideBetDraft.stake) || 0;
-            const shortA =
-              !!sideBetDraft.playerA && wantStake > 0 && balOf(sideBetDraft.playerA) < wantStake;
-            const shortB =
-              !!sideBetDraft.playerB && wantStake > 0 && balOf(sideBetDraft.playerB) < wantStake;
-            // Pair the individual side-bet legs back into head-to-head rows: one
-            // leg on teamA + one on teamB with the same stake = one matched bet.
+            const shortA = !!sideBetDraft.playerA && wantStake > 0 && balOf(sideBetDraft.playerA) < wantStake;
+            const shortB = !!sideBetDraft.playerB && wantStake > 0 && balOf(sideBetDraft.playerB) < wantStake;
+            // Pair the side-bet legs into head-to-head rows via pair_id.
             const legsA = sideBets.filter((b) => b.team_id === teamA?.id);
             const legsB = sideBets.filter((b) => b.team_id === teamB?.id);
-            const pairs: {
-              a: (typeof sideBets)[number];
-              b: (typeof sideBets)[number] | undefined;
-            }[] = [];
+            const pairs: { a: (typeof sideBets)[number]; b: (typeof sideBets)[number] | undefined }[] = [];
             const usedB = new Set<string>();
             for (const a of legsA) {
-              // Prefer linking by the shared pair_id; fall back to equal stake for
-              // any legacy legs placed before pair_id existed.
               const match =
                 legsB.find((x) => !usedB.has(x.id) && a.pair_id && x.pair_id === a.pair_id) ??
                 legsB.find((x) => !usedB.has(x.id) && x.stake === a.stake);
@@ -2676,99 +2820,60 @@ export default function Balancer({
               <div className="panel flex flex-col gap-3 rounded-2xl p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400">
-                    Side bets
+                    Side bets (player vs player)
                   </h3>
                   <span className="text-xs text-zinc-500">
-                    Head-to-head · winner takes the loser&apos;s coins · settles with the bracket
+                    Extra head-to-head wagers · winner takes the loser&apos;s coins
                   </span>
                 </div>
 
-                {/* Default stake for this Bet Game — pre-fills every new pair. */}
-                <div className="flex flex-wrap items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-2">
-                  <span className="text-xs font-semibold text-zinc-400">Default stake</span>
-                  <input
-                    value={session.sideStake ? String(session.sideStake) : ""}
-                    onChange={(e) => {
-                      const v = Math.trunc(Number(e.target.value.replace(/[^0-9]/g, ""))) || 0;
-                      setSession((s) => ({ ...s, sideStake: v }));
-                      // Keep the current draft's stake in sync if it's still empty
-                      // or matched the old default.
-                      setSideBetDraft((d) => ({ ...d, stake: v ? String(v) : d.stake }));
-                    }}
-                    placeholder="e.g. 100"
-                    inputMode="numeric"
-                    className="field w-28 rounded-lg px-2 py-1 text-sm tabular-nums"
-                  />
-                  <span className="text-xs text-zinc-600">applied to new bets below</span>
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-xs font-semibold" style={{ color: accentA }}>On Team {teamA?.id}</span>
+                    <select
+                      value={sideBetDraft.playerA}
+                      onChange={(e) => setSideBetDraft((s) => ({ ...s, playerA: e.target.value }))}
+                      className="field rounded-lg px-2 py-1.5 text-sm"
+                    >
+                      <option value="">Player…</option>
+                      {coinPlayers.map((p) => (
+                        <option key={p.email} value={p.email}>{p.ign} ({p.coins.toLocaleString()} 🪙)</option>
+                      ))}
+                    </select>
+                  </label>
+                  <span className="pb-2 text-xs font-bold text-zinc-600">vs</span>
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-xs font-semibold" style={{ color: accentB }}>On Team {teamB?.id}</span>
+                    <select
+                      value={sideBetDraft.playerB}
+                      onChange={(e) => setSideBetDraft((s) => ({ ...s, playerB: e.target.value }))}
+                      className="field rounded-lg px-2 py-1.5 text-sm"
+                    >
+                      <option value="">Player…</option>
+                      {coinPlayers.map((p) => (
+                        <option key={p.email} value={p.email}>{p.ign} ({p.coins.toLocaleString()} 🪙)</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-xs text-zinc-500">Stake each</span>
+                    <input
+                      value={sideBetDraft.stake}
+                      onChange={(e) => setSideBetDraft((s) => ({ ...s, stake: e.target.value.replace(/[^0-9]/g, "") }))}
+                      placeholder="e.g. 100"
+                      inputMode="numeric"
+                      className="field w-28 rounded-lg px-2 py-1.5 text-sm tabular-nums"
+                    />
+                  </label>
+                  <button
+                    onClick={() => void placeSideBet()}
+                    disabled={shortA || shortB}
+                    title={shortA || shortB ? "A player doesn't have enough coins" : undefined}
+                    className="btn-neon rounded-full px-5 py-2 text-sm disabled:opacity-40"
+                  >
+                    Match bet
+                  </button>
                 </div>
-
-                {!currentId ? (
-                  <p className="text-xs text-amber-300">Save the tournament first to take bets.</p>
-                ) : (
-                  <div className="flex flex-wrap items-end gap-2">
-                    <label className="flex flex-col gap-1 text-sm">
-                      <span className="text-xs font-semibold" style={{ color: accentA }}>
-                        On Team {teamA?.id}
-                      </span>
-                      <select
-                        value={sideBetDraft.playerA}
-                        onChange={(e) => setSideBetDraft((s) => ({ ...s, playerA: e.target.value }))}
-                        className="field rounded-lg px-2 py-1.5 text-sm"
-                      >
-                        <option value="">Player…</option>
-                        {coinPlayers.map((p) => (
-                          <option key={p.email} value={p.email}>
-                            {p.ign} ({p.coins.toLocaleString()} 🪙)
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <span className="pb-2 text-xs font-bold text-zinc-600">vs</span>
-                    <label className="flex flex-col gap-1 text-sm">
-                      <span className="text-xs font-semibold" style={{ color: accentB }}>
-                        On Team {teamB?.id}
-                      </span>
-                      <select
-                        value={sideBetDraft.playerB}
-                        onChange={(e) => setSideBetDraft((s) => ({ ...s, playerB: e.target.value }))}
-                        className="field rounded-lg px-2 py-1.5 text-sm"
-                      >
-                        <option value="">Player…</option>
-                        {coinPlayers.map((p) => (
-                          <option key={p.email} value={p.email}>
-                            {p.ign} ({p.coins.toLocaleString()} 🪙)
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="flex flex-col gap-1 text-sm">
-                      <span className="text-xs text-zinc-500">Stake each</span>
-                      <input
-                        value={sideBetDraft.stake}
-                        onChange={(e) =>
-                          setSideBetDraft((s) => ({ ...s, stake: e.target.value.replace(/[^0-9]/g, "") }))
-                        }
-                        placeholder="e.g. 100"
-                        inputMode="numeric"
-                        className="field w-28 rounded-lg px-2 py-1.5 text-sm tabular-nums"
-                      />
-                    </label>
-                    <button
-                      onClick={() => void placeSideBet()}
-                      disabled={shortA || shortB}
-                      title={shortA || shortB ? "A player doesn't have enough coins" : undefined}
-                      className="btn-neon rounded-full px-5 py-2 text-sm disabled:opacity-40"
-                    >
-                      Match bet
-                    </button>
-                    <button
-                      onClick={() => void refreshSideBets()}
-                      className="pb-2 text-xs font-semibold text-zinc-400 hover:text-white"
-                    >
-                      ↻
-                    </button>
-                  </div>
-                )}
 
                 {(shortA || shortB) && (
                   <p className="text-xs font-medium text-amber-300">
@@ -2782,25 +2887,16 @@ export default function Balancer({
                   <ul className="flex flex-col divide-y divide-[var(--panel-border)]">
                     {pairs.map(({ a, b }) => (
                       <li key={a.id} className="flex flex-wrap items-center gap-2 py-1.5 text-sm">
-                        <span className="font-medium" style={{ color: accentA }}>
-                          {ignOf(a.email)}
-                        </span>
+                        <span className="font-medium" style={{ color: accentA }}>{ignOf(a.email)}</span>
                         <span className="text-zinc-500">vs</span>
-                        <span className="font-medium" style={{ color: accentB }}>
-                          {b ? ignOf(b.email) : "—"}
-                        </span>
-                        <span className="tabular-nums text-[var(--lg-glow)]">
-                          {a.stake.toLocaleString()} 🪙 each
-                        </span>
+                        <span className="font-medium" style={{ color: accentB }}>{b ? ignOf(b.email) : "—"}</span>
+                        <span className="tabular-nums text-[var(--lg-glow)]">{a.stake.toLocaleString()} 🪙 each</span>
                         {a.status === "won" || b?.status === "won" ? (
                           <span className="text-xs font-semibold text-emerald-400">
-                            {a.status === "won" ? ignOf(a.email) : b ? ignOf(b.email) : ""} won +
-                            {a.stake.toLocaleString()} 🪙
+                            {a.status === "won" ? ignOf(a.email) : b ? ignOf(b.email) : ""} won +{a.stake.toLocaleString()} 🪙
                           </span>
                         ) : (
-                          <span className="rounded-full bg-sky-400/15 px-2 py-0.5 text-[11px] font-semibold text-sky-300">
-                            open
-                          </span>
+                          <span className="rounded-full bg-sky-400/15 px-2 py-0.5 text-[11px] font-semibold text-sky-300">open</span>
                         )}
                       </li>
                     ))}

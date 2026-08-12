@@ -89,6 +89,7 @@ export async function POST(req: NextRequest) {
       p_team_id: teamId,
       p_stake: stake,
       p_kind: kind,
+      p_pair_id: null,
     });
     if (error) {
       // Surface a friendly message for the common "insufficient balance" case.
