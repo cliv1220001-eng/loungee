@@ -85,6 +85,19 @@ const MODE_ICONS: Record<string, ReactNode> = {
   bet: <CoinIcon width={18} height={18} />,
 };
 
+/** Admin prop-bet markets (user vs house) with their picks + payout multiple. */
+const PROP_MARKETS: { key: string; label: string; mult: number; picks: string[] }[] = [
+  { key: "6min", label: "6-min rune", mult: 1, picks: ["Top", "Bottom"] },
+  { key: "8min", label: "8-min rune", mult: 1, picks: ["Top", "Bottom"] },
+  { key: "10min", label: "10-min rune", mult: 1, picks: ["Top", "Bottom"] },
+  {
+    key: "12min",
+    label: "12-min rune type",
+    mult: 3,
+    picks: ["DD", "Haste", "Invisibility", "Regeneration", "Arcane", "Illusion", "Shield"],
+  },
+];
+
 /** The measure of strength the balancer weights by (ignored by Random). */
 const BASES: { key: BalanceBasis; label: string; hint: string }[] = [
   { key: "lr", label: "LR", hint: "Current ladder rating" },
@@ -521,12 +534,38 @@ export default function Balancer({
   const [sideBets, setSideBets] = useState<
     { id: string; email: string; ign: string; team_id: number; stake: number; status: string; payout: number; pair_id: string | null }[]
   >([]);
-  const [sideBetDraft, setSideBetDraft] = useState<{ playerA: string; playerB: string; stake: string }>({
-    playerA: "",
-    playerB: "",
+  // Draft rows for queuing several matched side bets, then placing all at once.
+  type SideRow = { key: string; playerA: string; playerB: string; stake: string };
+  const newSideRow = (): SideRow => ({ key: crypto.randomUUID(), playerA: "", playerB: "", stake: "" });
+  const [sideRows, setSideRows] = useState<SideRow[]>([newSideRow()]);
+  const [sideBetMsg, setSideBetMsg] = useState<string | null>(null);
+  const [sideBusy, setSideBusy] = useState(false);
+  // Admin prop bets (user vs house) — rune-event markets. No fees.
+  const [propBets, setPropBets] = useState<
+    {
+      id: string;
+      email: string;
+      ign: string;
+      market: string;
+      pick: string;
+      stake: number;
+      payout_mult: number;
+      status: string;
+      outcome: string | null;
+    }[]
+  >([]);
+  // Draft rows for placing several prop bets at once. Each is one wager.
+  type PropRow = { key: string; email: string; market: string; pick: string; stake: string };
+  const newPropRow = (): PropRow => ({
+    key: crypto.randomUUID(),
+    email: "",
+    market: "6min",
+    pick: "",
     stake: "",
   });
-  const [sideBetMsg, setSideBetMsg] = useState<string | null>(null);
+  const [propRows, setPropRows] = useState<PropRow[]>([newPropRow()]);
+  const [propMsg, setPropMsg] = useState<string | null>(null);
+  const [propBusy, setPropBusy] = useState(false);
 
   // True once the roster differs from what was generated.
   const edited = useMemo(() => {
@@ -595,9 +634,10 @@ export default function Balancer({
   const refreshTeamBets = useCallback(async () => {
     if (!currentId) return;
     try {
-      const [pRes, bRes] = await Promise.all([
+      const [pRes, bRes, propRes] = await Promise.all([
         fetch("/api/coins"),
         fetch(`/api/bets?runId=${encodeURIComponent(currentId)}`),
+        fetch(`/api/propbets?runId=${encodeURIComponent(currentId)}`),
       ]);
       const pBody = (await pRes.json().catch(() => ({}))) as {
         players?: { email: string; ign: string; coins: number }[];
@@ -616,10 +656,15 @@ export default function Balancer({
           pair_id: string | null;
         }[];
       };
-      setCoinPlayers(pBody.players ?? []);
+      const propBody = (await propRes.json().catch(() => ({}))) as {
+        bets?: (typeof propBets)[number][];
+      };
+      // Hide the house account from the bettor lists (it can't bet on itself).
+      setCoinPlayers((pBody.players ?? []).filter((p) => p.email !== "admin@house.local"));
       const forMatch = (bBody.bets ?? []).filter((b) => b.match_id === BET_MATCH_ID);
       setTeamBets(forMatch.filter((b) => b.kind === "game"));
       setSideBets(forMatch.filter((b) => b.kind === "side"));
+      setPropBets(propBody.bets ?? []);
     } catch {
       // best-effort — the panel just shows what it last had
     }
@@ -926,44 +971,106 @@ export default function Balancer({
   }
 
   /** Place a player-vs-player side bet (matched pair, same stake). */
-  async function placeSideBet() {
+  /** Place every filled side-bet row (matched pairs) in one go. */
+  async function placeAllSideBets() {
     setSideBetMsg(null);
-    const { playerA, playerB, stake } = sideBetDraft;
     const teamA = result?.teams[0]?.id;
     const teamB = result?.teams[1]?.id;
     const balOf = (email: string) => coinPlayers.find((p) => p.email === email)?.coins ?? 0;
     const ignOf = (email: string) => coinPlayers.find((p) => p.email === email)?.ign ?? email;
     if (!currentId) return setSideBetMsg("Save the tournament first.");
-    if (!playerA || !playerB) return setSideBetMsg("Pick a player for each team.");
-    if (playerA === playerB) return setSideBetMsg("Pick two different players.");
-    const need = Number(stake);
-    if (!(need > 0)) return setSideBetMsg("Enter a stake.");
     if (teamA == null || teamB == null) return setSideBetMsg("Need two teams.");
-    if (balOf(playerA) < need) return setSideBetMsg(`${ignOf(playerA)} only has ${balOf(playerA)} coins.`);
-    if (balOf(playerB) < need) return setSideBetMsg(`${ignOf(playerB)} only has ${balOf(playerB)} coins.`);
 
+    const rows = sideRows.filter((r) => r.playerA && r.playerB && Number(r.stake) > 0);
+    if (rows.length === 0) return setSideBetMsg("Fill at least one pair (two players + stake).");
+    for (const r of rows) {
+      if (r.playerA === r.playerB) return setSideBetMsg("Each pair needs two different players.");
+    }
+    // Affordability across all rows, summed per player.
+    const need = new Map<string, number>();
+    for (const r of rows) {
+      need.set(r.playerA, (need.get(r.playerA) ?? 0) + Number(r.stake));
+      need.set(r.playerB, (need.get(r.playerB) ?? 0) + Number(r.stake));
+    }
+    const short = [...need].filter(([e, amt]) => balOf(e) < amt);
+    if (short.length > 0) {
+      return setSideBetMsg(`Not enough coins: ${short.map(([e]) => ignOf(e)).join(", ")}`);
+    }
+
+    setSideBusy(true);
     await saveNow();
-    const res = await fetch("/api/bets/side", {
+    let failed = 0;
+    for (const r of rows) {
+      const res = await fetch("/api/bets/side", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId: currentId,
+          matchId: BET_MATCH_ID,
+          stake: Number(r.stake),
+          playerA: r.playerA,
+          teamA,
+          playerB: r.playerB,
+          teamB,
+        }),
+      });
+      if (!res.ok) failed++;
+    }
+    setSideBusy(false);
+    if (failed > 0) setSideBetMsg(`${failed} bet${failed === 1 ? "" : "s"} couldn't be placed.`);
+    setSideRows([newSideRow()]);
+    await refreshTeamBets();
+  }
+
+  /** Place every filled prop-bet row (user vs house) in one go. */
+  async function placeAllProps() {
+    setPropMsg(null);
+    if (!currentId) return setPropMsg("Save the tournament first.");
+    const balOf = (e: string) => coinPlayers.find((p) => p.email === e)?.coins ?? 0;
+    const rows = propRows.filter((r) => r.email && r.pick && Number(r.stake) > 0);
+    if (rows.length === 0) return setPropMsg("Fill at least one bet (player, pick, stake).");
+
+    // Pre-check affordability, summing multiple bets by the same player.
+    const need = new Map<string, number>();
+    for (const r of rows) need.set(r.email, (need.get(r.email) ?? 0) + Number(r.stake));
+    const short = [...need].filter(([e, amt]) => balOf(e) < amt);
+    if (short.length > 0) {
+      const names = short.map(([e]) => coinPlayers.find((p) => p.email === e)?.ign ?? e);
+      return setPropMsg(`Not enough coins: ${names.join(", ")}`);
+    }
+
+    setPropBusy(true);
+    await saveNow();
+    let failed = 0;
+    for (const r of rows) {
+      const res = await fetch("/api/propbets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId: currentId,
+          email: r.email,
+          market: r.market,
+          pick: r.pick,
+          stake: Number(r.stake),
+        }),
+      });
+      if (!res.ok) failed++;
+    }
+    setPropBusy(false);
+    if (failed > 0) setPropMsg(`${failed} bet${failed === 1 ? "" : "s"} couldn't be placed.`);
+    // Reset to a single blank row.
+    setPropRows([newPropRow()]);
+    await refreshTeamBets();
+  }
+
+  /** Settle (or void) a prop bet by entering its actual outcome. */
+  async function settleProp(id: string, body: { outcome?: string; void?: boolean }) {
+    const res = await fetch(`/api/propbets/${id}/settle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runId: currentId,
-        matchId: BET_MATCH_ID,
-        stake: need,
-        playerA,
-        teamA,
-        playerB,
-        teamB,
-      }),
+      body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      const b = (await res.json().catch(() => ({}))) as { error?: string };
-      setSideBetMsg(b.error ?? "Bet failed.");
-      return;
-    }
-    // Keep the stake so you can add pair after pair quickly.
-    setSideBetDraft((d) => ({ playerA: "", playerB: "", stake: d.stake }));
-    await refreshTeamBets();
+    if (res.ok) await refreshTeamBets();
   }
 
   const teamNote: { tone: "info" | "warn" | "ok"; text: string } = (() => {
@@ -2721,7 +2828,7 @@ export default function Balancer({
                     Team bet
                   </h3>
                   <span className="text-xs text-zinc-500">
-                    Everyone bets on their team · even money · settles with the bracket
+                    Everyone bets on their team · ₱5/player fee · settles with the bracket
                   </span>
                 </div>
 
@@ -2800,11 +2907,9 @@ export default function Balancer({
             const accentA = TEAM_ACCENTS[0];
             const accentB = TEAM_ACCENTS[1];
             const ignOf = (email: string) => coinPlayers.find((p) => p.email === email)?.ign ?? email;
-            const balOf = (email: string) => coinPlayers.find((p) => p.email === email)?.coins ?? 0;
-            const wantStake = Number(sideBetDraft.stake) || 0;
-            const shortA = !!sideBetDraft.playerA && wantStake > 0 && balOf(sideBetDraft.playerA) < wantStake;
-            const shortB = !!sideBetDraft.playerB && wantStake > 0 && balOf(sideBetDraft.playerB) < wantStake;
-            // Pair the side-bet legs into head-to-head rows via pair_id.
+            const setSRow = (key: string, patch: Partial<SideRow>) =>
+              setSideRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+            // Pair the placed side-bet legs into head-to-head rows via pair_id.
             const legsA = sideBets.filter((b) => b.team_id === teamA?.id);
             const legsB = sideBets.filter((b) => b.team_id === teamB?.id);
             const pairs: { a: (typeof sideBets)[number]; b: (typeof sideBets)[number] | undefined }[] = [];
@@ -2823,64 +2928,88 @@ export default function Balancer({
                     Side bets (player vs player)
                   </h3>
                   <span className="text-xs text-zinc-500">
-                    Extra head-to-head wagers · winner takes the loser&apos;s coins
+                    Extra head-to-head wagers · 5% fee · winner takes the rest
                   </span>
                 </div>
 
-                <div className="flex flex-wrap items-end gap-2">
-                  <label className="flex flex-col gap-1 text-sm">
-                    <span className="text-xs font-semibold" style={{ color: accentA }}>On Team {teamA?.id}</span>
-                    <select
-                      value={sideBetDraft.playerA}
-                      onChange={(e) => setSideBetDraft((s) => ({ ...s, playerA: e.target.value }))}
-                      className="field rounded-lg px-2 py-1.5 text-sm"
-                    >
-                      <option value="">Player…</option>
-                      {coinPlayers.map((p) => (
-                        <option key={p.email} value={p.email}>{p.ign} ({p.coins.toLocaleString()} 🪙)</option>
-                      ))}
-                    </select>
-                  </label>
-                  <span className="pb-2 text-xs font-bold text-zinc-600">vs</span>
-                  <label className="flex flex-col gap-1 text-sm">
-                    <span className="text-xs font-semibold" style={{ color: accentB }}>On Team {teamB?.id}</span>
-                    <select
-                      value={sideBetDraft.playerB}
-                      onChange={(e) => setSideBetDraft((s) => ({ ...s, playerB: e.target.value }))}
-                      className="field rounded-lg px-2 py-1.5 text-sm"
-                    >
-                      <option value="">Player…</option>
-                      {coinPlayers.map((p) => (
-                        <option key={p.email} value={p.email}>{p.ign} ({p.coins.toLocaleString()} 🪙)</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1 text-sm">
-                    <span className="text-xs text-zinc-500">Stake each</span>
-                    <input
-                      value={sideBetDraft.stake}
-                      onChange={(e) => setSideBetDraft((s) => ({ ...s, stake: e.target.value.replace(/[^0-9]/g, "") }))}
-                      placeholder="e.g. 100"
-                      inputMode="numeric"
-                      className="field w-28 rounded-lg px-2 py-1.5 text-sm tabular-nums"
-                    />
-                  </label>
+                {/* One row per matched pair — add as many as you need, place all. */}
+                <div className="flex flex-col gap-2">
+                  {sideRows.map((row, i) => (
+                    <div key={row.key} className="flex flex-wrap items-end gap-2">
+                      <label className="flex flex-col gap-1 text-sm">
+                        {i === 0 && (
+                          <span className="text-xs font-semibold" style={{ color: accentA }}>
+                            On Team {teamA?.id}
+                          </span>
+                        )}
+                        <select
+                          value={row.playerA}
+                          onChange={(e) => setSRow(row.key, { playerA: e.target.value })}
+                          className="field rounded-lg px-2 py-1.5 text-sm"
+                        >
+                          <option value="">Player…</option>
+                          {coinPlayers.map((p) => (
+                            <option key={p.email} value={p.email}>{p.ign} ({p.coins.toLocaleString()} 🪙)</option>
+                          ))}
+                        </select>
+                      </label>
+                      <span className="pb-2 text-xs font-bold text-zinc-600">vs</span>
+                      <label className="flex flex-col gap-1 text-sm">
+                        {i === 0 && (
+                          <span className="text-xs font-semibold" style={{ color: accentB }}>
+                            On Team {teamB?.id}
+                          </span>
+                        )}
+                        <select
+                          value={row.playerB}
+                          onChange={(e) => setSRow(row.key, { playerB: e.target.value })}
+                          className="field rounded-lg px-2 py-1.5 text-sm"
+                        >
+                          <option value="">Player…</option>
+                          {coinPlayers.map((p) => (
+                            <option key={p.email} value={p.email}>{p.ign} ({p.coins.toLocaleString()} 🪙)</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1 text-sm">
+                        {i === 0 && <span className="text-xs text-zinc-500">Stake each</span>}
+                        <input
+                          value={row.stake}
+                          onChange={(e) => setSRow(row.key, { stake: e.target.value.replace(/[^0-9]/g, "") })}
+                          placeholder="e.g. 100"
+                          inputMode="numeric"
+                          className="field w-28 rounded-lg px-2 py-1.5 text-sm tabular-nums"
+                        />
+                      </label>
+                      {sideRows.length > 1 && (
+                        <button
+                          onClick={() => setSideRows((rows) => rows.filter((r) => r.key !== row.key))}
+                          title="Remove pair"
+                          className="pb-2 text-lg font-bold text-zinc-600 hover:text-red-300"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => void placeSideBet()}
-                    disabled={shortA || shortB}
-                    title={shortA || shortB ? "A player doesn't have enough coins" : undefined}
+                    onClick={() => setSideRows((rows) => [...rows, newSideRow()])}
+                    className="rounded-full border border-[var(--panel-border)] px-4 py-1.5 text-sm font-semibold text-zinc-300 hover:bg-white/5"
+                  >
+                    + Add player
+                  </button>
+                  <button
+                    onClick={() => void placeAllSideBets()}
+                    disabled={sideBusy}
                     className="btn-neon rounded-full px-5 py-2 text-sm disabled:opacity-40"
                   >
-                    Match bet
+                    {sideBusy ? "Placing…" : "Place all"}
                   </button>
                 </div>
 
-                {(shortA || shortB) && (
-                  <p className="text-xs font-medium text-amber-300">
-                    {shortA && `${ignOf(sideBetDraft.playerA)} has only ${balOf(sideBetDraft.playerA)} coins. `}
-                    {shortB && `${ignOf(sideBetDraft.playerB)} has only ${balOf(sideBetDraft.playerB)} coins.`}
-                  </p>
-                )}
                 {sideBetMsg && <p className="text-sm font-medium text-red-400">{sideBetMsg}</p>}
 
                 {pairs.length > 0 && (
@@ -2900,6 +3029,178 @@ export default function Balancer({
                         )}
                       </li>
                     ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Admin bets — user vs the house on rune events. No fees. Manually
+              settled by entering the actual outcome. */}
+          {sideBetsActive && (() => {
+            const ignOf = (email: string) => coinPlayers.find((p) => p.email === email)?.ign ?? email;
+            const setRow = (key: string, patch: Partial<PropRow>) =>
+              setPropRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+            return (
+              <div className="panel flex flex-col gap-3 rounded-2xl p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400">
+                    Player vs House
+                  </h3>
+                  <span className="text-xs text-zinc-500">
+                    Rune events · no fees · settled manually
+                  </span>
+                </div>
+
+                {/* One row per wager — add as many as you need, then place all. */}
+                <div className="flex flex-col gap-2">
+                  {propRows.map((row, i) => {
+                    const rowMarket = PROP_MARKETS.find((m) => m.key === row.market) ?? PROP_MARKETS[0];
+                    return (
+                      <div key={row.key} className="flex flex-wrap items-end gap-2">
+                        <label className="flex flex-col gap-1 text-sm">
+                          {i === 0 && <span className="text-xs text-zinc-500">Player</span>}
+                          <select
+                            value={row.email}
+                            onChange={(e) => setRow(row.key, { email: e.target.value })}
+                            className="field rounded-lg px-2 py-1.5 text-sm"
+                          >
+                            <option value="">Player…</option>
+                            {coinPlayers.map((p) => (
+                              <option key={p.email} value={p.email}>
+                                {p.ign} ({p.coins.toLocaleString()} 🪙)
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="flex flex-col gap-1 text-sm">
+                          {i === 0 && <span className="text-xs text-zinc-500">Market</span>}
+                          <select
+                            value={row.market}
+                            onChange={(e) => setRow(row.key, { market: e.target.value, pick: "" })}
+                            className="field rounded-lg px-2 py-1.5 text-sm"
+                          >
+                            {PROP_MARKETS.map((m) => (
+                              <option key={m.key} value={m.key}>
+                                {m.label} (1:{m.mult})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="flex flex-col gap-1 text-sm">
+                          {i === 0 && <span className="text-xs text-zinc-500">Pick</span>}
+                          <select
+                            value={row.pick}
+                            onChange={(e) => setRow(row.key, { pick: e.target.value })}
+                            className="field rounded-lg px-2 py-1.5 text-sm"
+                          >
+                            <option value="">Pick…</option>
+                            {rowMarket.picks.map((pk) => (
+                              <option key={pk} value={pk}>
+                                {pk}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="flex flex-col gap-1 text-sm">
+                          {i === 0 && <span className="text-xs text-zinc-500">Stake</span>}
+                          <input
+                            value={row.stake}
+                            onChange={(e) => setRow(row.key, { stake: e.target.value.replace(/[^0-9]/g, "") })}
+                            placeholder="e.g. 50"
+                            inputMode="numeric"
+                            className="field w-24 rounded-lg px-2 py-1.5 text-sm tabular-nums"
+                          />
+                        </label>
+                        {propRows.length > 1 && (
+                          <button
+                            onClick={() => setPropRows((rows) => rows.filter((r) => r.key !== row.key))}
+                            title="Remove row"
+                            className="pb-2 text-lg font-bold text-zinc-600 hover:text-red-300"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => setPropRows((rows) => [...rows, newPropRow()])}
+                    className="rounded-full border border-[var(--panel-border)] px-4 py-1.5 text-sm font-semibold text-zinc-300 hover:bg-white/5"
+                  >
+                    + Add player
+                  </button>
+                  <button
+                    onClick={() => void placeAllProps()}
+                    disabled={propBusy}
+                    className="btn-neon rounded-full px-5 py-2 text-sm disabled:opacity-40"
+                  >
+                    {propBusy ? "Placing…" : "Place all"}
+                  </button>
+                </div>
+                <p className="text-xs text-zinc-600">
+                  Location markets pay 1:1; rune type pays 1:3. Loss goes to the house.
+                </p>
+                {propMsg && <p className="text-sm font-medium text-red-400">{propMsg}</p>}
+
+                {/* Existing prop bets */}
+                {propBets.length > 0 && (
+                  <ul className="flex flex-col divide-y divide-[var(--panel-border)]">
+                    {propBets.map((pb) => {
+                      const mk = PROP_MARKETS.find((m) => m.key === pb.market);
+                      return (
+                        <li key={pb.id} className="flex flex-wrap items-center gap-2 py-1.5 text-sm">
+                          <span className="font-medium text-zinc-200">{ignOf(pb.email)}</span>
+                          <span className="text-zinc-500">·</span>
+                          <span className="text-zinc-300">{mk?.label ?? pb.market}</span>
+                          <span className="rounded bg-white/10 px-1.5 py-0.5 text-[11px] font-semibold text-zinc-200">
+                            {pb.pick}
+                          </span>
+                          <span className="tabular-nums text-[var(--lg-glow)]">
+                            {pb.stake.toLocaleString()} 🪙 · 1:{pb.payout_mult}
+                          </span>
+                          {pb.status === "open" ? (
+                            <span className="ml-auto flex flex-wrap items-center gap-1">
+                              {(mk?.picks ?? []).map((pk) => (
+                                <button
+                                  key={pk}
+                                  onClick={() => void settleProp(pb.id, { outcome: pk })}
+                                  title={`Settle: actual outcome was ${pk}`}
+                                  className="rounded border border-[var(--panel-border)] px-2 py-0.5 text-[11px] font-semibold text-zinc-300 hover:bg-white/5"
+                                >
+                                  {pk}
+                                </button>
+                              ))}
+                              <button
+                                onClick={() => void settleProp(pb.id, { void: true })}
+                                className="px-1 text-[11px] font-semibold text-zinc-500 hover:text-red-300"
+                              >
+                                void
+                              </button>
+                            </span>
+                          ) : (
+                            <span
+                              className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                pb.status === "won"
+                                  ? "bg-emerald-400/15 text-emerald-300"
+                                  : pb.status === "lost"
+                                    ? "bg-zinc-500/15 text-zinc-400"
+                                    : "bg-zinc-500/15 text-zinc-400"
+                              }`}
+                            >
+                              {pb.status === "won"
+                                ? `won (${pb.outcome})`
+                                : pb.status === "lost"
+                                  ? `lost (${pb.outcome})`
+                                  : "void"}
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>

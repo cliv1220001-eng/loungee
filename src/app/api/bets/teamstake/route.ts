@@ -11,6 +11,8 @@ function errorResponse(e: unknown, status = 500) {
 
 /** Allowed team-stake tiers. */
 const TIERS = [20, 50, 100];
+/** Flat per-player fee (coins == pesos), taken from each stake, to the house. */
+const TEAM_FEE = 5;
 
 /**
  * ADMIN: lock in a Bet Game's team wager. EVERY player on team A bets `stake` on
@@ -95,16 +97,14 @@ export async function POST(req: NextRequest) {
     const placed: string[] = [];
     const placeAll = async (emails: string[], teamId: number) => {
       for (const email of emails) {
-        const { data: id, error } = await sb.rpc("place_bet", {
+        // place_team_bet takes the flat fee (₱5) from the stake → house.
+        const { data: id, error } = await sb.rpc("place_team_bet", {
           p_run_id: runId,
           p_match_id: matchId,
           p_email: email,
           p_team_id: teamId,
           p_stake: stake,
-          p_kind: "game",
-          // Pass p_pair_id explicitly so the call resolves to the current
-          // signature even if an older overload still lingers in the DB.
-          p_pair_id: null,
+          p_fee: TEAM_FEE,
         });
         if (error) throw new Error(error.message);
         placed.push(id as string);
