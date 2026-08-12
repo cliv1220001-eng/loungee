@@ -70,14 +70,16 @@ export async function POST(req: NextRequest) {
       .select("email,ign,coins")
       .in("email", everyone);
     if (balErr) throw new Error(balErr.message);
+    // Each player risks the stake PLUS the flat fee.
+    const cost = stake + TEAM_FEE;
     const byEmail = new Map((rows ?? []).map((r) => [r.email, r]));
     const short = everyone
       .map((e) => byEmail.get(e))
-      .filter((p) => !p || p.coins < stake)
+      .filter((p) => !p || p.coins < cost)
       .map((p, i) => (p ? p.ign || p.email : `player ${i + 1}`));
     if (short.length > 0) {
       return errorResponse(
-        new Error(`Not enough coins (need ${stake} each): ${short.join(", ")}`),
+        new Error(`Not enough coins (need ${cost} each): ${short.join(", ")}`),
         400
       );
     }

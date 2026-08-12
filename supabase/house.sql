@@ -77,21 +77,25 @@ declare
   new_id uuid;
 begin
   if p_stake <= 0 then raise exception 'stake must be positive'; end if;
-  if p_fee < 0 or p_fee >= p_stake then raise exception 'bad fee'; end if;
+  if p_fee < 0 then raise exception 'bad fee'; end if;
   select coins into bal from players where email = email_l;
   if bal is null then raise exception 'player % not found', email_l; end if;
-  if bal < p_stake then
-    raise exception 'insufficient balance: have %, need %', bal, p_stake;
+  -- The player risks the full stake PLUS the flat fee (fee is on top, not part
+  -- of the wager). Both are debited now; the fee goes straight to the house.
+  if bal < p_stake + p_fee then
+    raise exception 'insufficient balance: have %, need %', bal, p_stake + p_fee;
   end if;
 
   insert into bets (run_id, match_id, email, team_id, stake, kind, fee)
   values (p_run_id, p_match_id, email_l, p_team_id, p_stake, 'game', p_fee)
   returning id into new_id;
 
-  -- Debit the full stake, then send the fee to the house immediately.
+  -- Debit the stake (the wager) and the fee separately.
   insert into coin_events (email, delta, kind, ref, note)
   values (email_l, -p_stake, 'bet_stake', new_id::text, 'Team bet placed');
   if p_fee > 0 then
+    insert into coin_events (email, delta, kind, ref, note)
+    values (email_l, -p_fee, 'fee', new_id::text, 'Team bet fee');
     insert into coin_events (email, delta, kind, ref, note)
     values ('admin@house.local', p_fee, 'fee', new_id::text, 'Team bet fee');
     perform recompute_coins('admin@house.local');
@@ -102,15 +106,15 @@ begin
 end $$;
 
 -- Settle every OPEN bet on a match against the winning team, fee-aware.
---   game/team bets: winner is paid 2*(stake - fee) → net +(stake-fee); loser 0.
---                   (the fee was already taken to the house at placement.)
+--   team/game bets: the fee was already taken at placement. The winner takes the
+--                   loser's stake (full even money) → paid 2*stake. So for a 20
+--                   bet: paid 40 → net +15 (won 20, minus the 5 fee); loser -25.
 --   side bets: winner is paid pot - 5% of pot; the 5% goes to the house.
 -- Idempotent: only touches open bets. REPLACES the coins.sql settle_match.
 create or replace function settle_match(p_run_id text, p_match_id text, p_winning_team_id integer)
 returns void language plpgsql as $$
 declare
   b bets%rowtype;
-  wagered integer;
   win_pay integer;
   side_fee integer;
 begin
@@ -134,9 +138,9 @@ begin
         end if;
         perform recompute_coins(b.email);
       else
-        -- team/game bet: even money on the fee-adjusted wager.
-        wagered := b.stake - b.fee;
-        win_pay := wagered * 2;
+        -- team bet: winner takes the loser's stake — full even money, 2*stake.
+        -- (The fee already went to the house at placement.)
+        win_pay := b.stake * 2;
         update bets set status = 'won', payout = win_pay, settled_at = now() where id = b.id;
         insert into coin_events (email, delta, kind, ref, note)
         values (b.email, win_pay, 'bet_payout', b.id::text, 'Team bet won');
@@ -144,7 +148,7 @@ begin
       end if;
     else
       update bets set status = 'lost', payout = 0, settled_at = now() where id = b.id;
-      -- stake (incl. fee) already left the player at placement; nothing to refund.
+      -- stake + fee already left the player at placement; nothing to refund.
     end if;
   end loop;
 end $$;
